@@ -1,0 +1,7 @@
+requests
+python-telegram-bot==20.3
+pandas
+ta
+gspread
+oauth2client
+psycopg2-binary
