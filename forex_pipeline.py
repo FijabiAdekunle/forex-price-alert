@@ -1,68 +1,156 @@
 import os
+import json
 import requests
 import pandas as pd
+from datetime import datetime
 from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
-from datetime import datetime
+import psycopg2
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import telegram
+from dotenv import load_dotenv
 
-# Load secrets from GitHub Actions env or .env (if running locally)
-ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
+load_dotenv()  # For local testing
+
+# === CONFIG ===
 PAIRS = {
     "EUR/USD": "EURUSD",
     "GBP/USD": "GBPUSD",
     "USD/JPY": "USDJPY"
 }
+INTERVAL = "15min"
+ALPHAVANTAGE_URL = "https://www.alphavantage.co/query"
 
-def fetch_forex_data(pair_code):
-    url = f"https://www.alphavantage.co/query?function=FX_INTRADAY&from_symbol={pair_code[:3]}&to_symbol={pair_code[3:]}&interval=5min&apikey={ALPHAVANTAGE_API_KEY}&outputsize=compact"
-    r = requests.get(url)
+# === MAIN FUNCTIONS ===
+def fetch_data(symbol):
+    params = {
+        "function": "FX_INTRADAY",
+        "from_symbol": symbol[:3],
+        "to_symbol": symbol[4:],
+        "interval": INTERVAL,
+        "apikey": os.getenv("ALPHAVANTAGE_API_KEY"),
+        "outputsize": "compact"
+    }
+    r = requests.get(ALPHAVANTAGE_URL, params=params)
     data = r.json()
-
-    if "Time Series FX (5min)" not in data:
-        raise Exception(f"API Error: {data}")
-
-    df = pd.DataFrame.from_dict(data["Time Series FX (5min)"], orient="index", dtype=float)
-    df.columns = ['Open', 'High', 'Low', 'Close']
+    key = f"Time Series FX ({INTERVAL})"
+    if key not in data:
+        raise Exception(f"Failed to fetch {symbol}: {data}")
+    df = pd.DataFrame.from_dict(data[key], orient="index", dtype="float").rename(columns={
+        "1. open": "open",
+        "2. high": "high",
+        "3. low": "low",
+        "4. close": "close"
+    }).sort_index()
     df.index = pd.to_datetime(df.index)
-    df.sort_index(inplace=True)
-
+    df = df.tail(50)
     return df
 
-def calculate_indicators(df):
-    df["EMA_10"] = EMAIndicator(df["Close"], window=10).ema_indicator()
-    df["EMA_50"] = EMAIndicator(df["Close"], window=50).ema_indicator()
-    df["RSI"] = RSIIndicator(df["Close"]).rsi()
-    df["ATR"] = AverageTrueRange(df["High"], df["Low"], df["Close"]).average_true_range()
+def compute_indicators(df):
+    df["EMA 10"] = EMAIndicator(df["close"], window=10).ema_indicator()
+    df["EMA 50"] = EMAIndicator(df["close"], window=50).ema_indicator()
+    df["RSI"] = RSIIndicator(df["close"], window=14).rsi()
+    df["ATR"] = AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range()
     return df
 
+def insert_to_postgres(rows):
+    try:
+        conn = psycopg2.connect(
+            host=os.getenv("PG_HOST"),
+            port=os.getenv("PG_PORT"),
+            database=os.getenv("PG_DB"),
+            user=os.getenv("PG_USER"),
+            password=os.getenv("PG_PASSWORD")
+        )
+        cur = conn.cursor()
+        for row in rows:
+            cur.execute("""
+                INSERT INTO forex_history (
+                    timestamp, pair, open, high, low, close, ema10, ema50, rsi, atr, support, resistance
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row["timestamp"],
+                row["pair"],
+                row["open"],
+                row["high"],
+                row["low"],
+                row["close"],
+                row["EMA 10"],
+                row["EMA 50"],
+                row["RSI"],
+                row["ATR"],
+                row["support"],
+                row["resistance"]
+            ))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print("PostgreSQL error:", e)
+
+def append_to_google_sheets(rows):
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(os.getenv("GSPREAD_KEY_JSON"))
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1n6CtgC-niE5NYCMsA_MLNOwy_79ID_2oMnTP64DUx28/edit") 
+        ws = sheet.sheet1
+        for row in rows:
+            ws.append_row([
+                row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                row["pair"],
+                row["close"],
+                row["high"],
+                row["low"],
+                row["close"],
+                row["EMA 10"],
+                row["EMA 50"],
+                row["RSI"],
+                row["ATR"],
+                row["support"],
+                row["resistance"]
+            ])
+    except Exception as e:
+        print("Google Sheets error:", e)
+
+def send_telegram_alert(rows):
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    bot = telegram.Bot(token=token)
+    for row in rows:
+        if row["RSI"] < 30 or row["RSI"] > 70:
+            msg = f"⚠️ {row['pair']} ALERT\nPrice: {row['close']:.4f}\nRSI: {row['RSI']:.2f}\nTime: {row['timestamp']}"
+            bot.send_message(chat_id=chat_id, text=msg)
+
+# === ENTRY POINT ===
 def main():
-    results = []
+    all_data = []
+    for pair, symbol in PAIRS.items():
+        df = fetch_data(symbol)
+        df = compute_indicators(df)
+        latest = df.iloc[-1]
+        row = {
+            "timestamp": latest.name,
+            "pair": pair,
+            "open": latest["open"],
+            "high": latest["high"],
+            "low": latest["low"],
+            "close": latest["close"],
+            "EMA 10": latest["EMA 10"],
+            "EMA 50": latest["EMA 50"],
+            "RSI": latest["RSI"],
+            "ATR": latest["ATR"],
+            "support": None,
+            "resistance": None
+        }
+        all_data.append(row)
 
-    for name, code in PAIRS.items():
-        try:
-            df = fetch_forex_data(code)
-            df = calculate_indicators(df)
-            latest = df.iloc[-1]
+    insert_to_postgres(all_data)
+    append_to_google_sheets(all_data)
+    send_telegram_alert(all_data)
 
-            print(f"[{name}] {latest.name} | Price: {latest['Close']:.5f} | RSI: {latest['RSI']:.2f}")
-            results.append({
-                "timestamp": latest.name,
-                "pair": name,
-                "rate": latest["Close"],
-                "high": latest["High"],
-                "low": latest["Low"],
-                "close": latest["Close"],
-                "EMA 10": latest["EMA_10"],
-                "EMA 50": latest["EMA_50"],
-                "RSI": latest["RSI"],
-                "ATR": latest["ATR"]
-            })
-        except Exception as e:
-            print(f"Error processing {name}: {e}")
-    
-    # Placeholder for Google Sheets, Supabase, Telegram
-    # We'll add each of them next.
-    
 if __name__ == "__main__":
     main()
