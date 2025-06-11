@@ -20,13 +20,13 @@ PAIRS = {
     "GBP/USD": "GBPUSD",
     "USD/JPY": "USDJPY"
 }
-INTERVAL = "15min"
+INTERVAL = "Daily"
 ALPHAVANTAGE_URL = "https://www.alphavantage.co/query"
 
 # === MAIN FUNCTIONS ===
 def fetch_data(symbol):
     params = {
-        "function": "FX_INTRADAY",
+        "function": "FX_DAILY",
         "from_symbol": symbol[:3],
         "to_symbol": symbol[4:],
         "interval": INTERVAL,
