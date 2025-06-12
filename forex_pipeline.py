@@ -12,40 +12,46 @@ from oauth2client.service_account import ServiceAccountCredentials
 import telegram
 from dotenv import load_dotenv
 
-load_dotenv()  # For local testing
+load_dotenv()
 
-# === CONFIG ===
 PAIRS = {
-    "EUR/USD": "EURUSD",
-    "GBP/USD": "GBPUSD",
-    "USD/JPY": "USDJPY"
+    "EUR/USD": "EUR/USD",
+    "GBP/USD": "GBP/USD",
+    "USD/JPY": "USD/JPY"
 }
-INTERVAL = "Daily"
-ALPHAVANTAGE_URL = "https://www.alphavantage.co/query"
+INTERVAL = "15min"
+TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 
-# === MAIN FUNCTIONS ===
 def fetch_data(symbol):
     params = {
-        "function": "FX_DAILY",
-        "from_symbol": symbol[:3],
-        "to_symbol": symbol[4:],
+        "symbol": symbol,
         "interval": INTERVAL,
-        "apikey": os.getenv("ALPHAVANTAGE_API_KEY"),
-        "outputsize": "compact"
+        "apikey": os.getenv("TWELVE_DATA_API_KEY"),
+        "outputsize": 50,
+        "format": "JSON"
     }
-    r = requests.get(ALPHAVANTAGE_URL, params=params)
+    r = requests.get(TWELVE_DATA_URL, params=params)
     data = r.json()
-    key = f"Time Series FX ({INTERVAL})"
-    if key not in data:
+    if "values" not in data:
         raise Exception(f"Failed to fetch {symbol}: {data}")
-    df = pd.DataFrame.from_dict(data[key], orient="index", dtype="float").rename(columns={
-        "1. open": "open",
-        "2. high": "high",
-        "3. low": "low",
-        "4. close": "close"
-    }).sort_index()
-    df.index = pd.to_datetime(df.index)
-    df = df.tail(50)
+
+    df = pd.DataFrame(data["values"])
+    df = df.rename(columns={
+        "datetime": "timestamp",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close"
+    })
+    df = df.astype({
+        "open": "float",
+        "high": "float",
+        "low": "float",
+        "close": "float"
+    })
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df.set_index("timestamp", inplace=True)
+    df = df.sort_index()
     return df
 
 def compute_indicators(df):
@@ -96,7 +102,7 @@ def append_to_google_sheets(rows):
         creds_dict = json.loads(os.getenv("GSPREAD_KEY_JSON"))
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1n6CtgC-niE5NYCMsA_MLNOwy_79ID_2oMnTP64DUx28/edit") 
+        sheet = client.open_by_url(os.getenv("GOOGLE_SHEET_URL"))
         ws = sheet.sheet1
         for row in rows:
             ws.append_row([
@@ -125,7 +131,6 @@ def send_telegram_alert(rows):
             msg = f"⚠️ {row['pair']} ALERT\nPrice: {row['close']:.4f}\nRSI: {row['RSI']:.2f}\nTime: {row['timestamp']}"
             bot.send_message(chat_id=chat_id, text=msg)
 
-# === ENTRY POINT ===
 def main():
     all_data = []
     for pair, symbol in PAIRS.items():
