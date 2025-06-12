@@ -124,10 +124,10 @@ def append_to_google_sheets(rows):
                             row["high"],
                             row["low"],
                             row["close"],
-                            row["ema 10"],
-                            row["ema 50"],
-                            row["rsi"],
-                            row["atr"],
+                            row["EMA 10"],
+                            row["EMA 50"],
+                            row["RSI"],
+                            row["ATR"],
                             row["support"], 
                             row["resistance"]
                             ])
