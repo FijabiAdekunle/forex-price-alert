@@ -120,7 +120,7 @@ def append_to_google_sheets(rows):
             print("Appending row:", row)
             ws.append_row([(row["Timestamp"] + pd.Timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
                             row["Pair"],
-                            row["Open"],
+                            row["Rate"],
                             row["High"],
                             row["Low"],
                             row["Close"],
