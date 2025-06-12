@@ -98,13 +98,16 @@ def insert_to_postgres(rows):
 
 def append_to_google_sheets(rows):
     try:
+        print("🔄 Connecting to Google Sheets...")
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds_dict = json.loads(os.getenv("GSPREAD_KEY_JSON"))
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        sheet = client.open_by_url(os.getenv("GOOGLE_SHEET_URL"))
+        sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1n6CtgC-niE5NYCMsA_MLNOwy_79ID_2oMnTP64DUx28/edit")
         ws = sheet.sheet1
+        print("✅ Connected. Appending rows...")
         for row in rows:
+            print("Appending row:", row)
             ws.append_row([
                 row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
                 row["pair"],
@@ -119,8 +122,10 @@ def append_to_google_sheets(rows):
                 row["support"],
                 row["resistance"]
             ])
+        print("✅ Google Sheets updated successfully.")
     except Exception as e:
-        print("Google Sheets error:", e)
+        print("❌ Google Sheets error:", e)
+
 
 def send_telegram_alert(rows):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
