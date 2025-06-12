@@ -1,8 +1,8 @@
-import os
+import os 
 import json
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
@@ -19,8 +19,19 @@ PAIRS = {
     "GBP/USD": "GBP/USD",
     "USD/JPY": "USD/JPY"
 }
+
+THRESHOLDS = {
+    "EUR/USD": 1.1200,
+    "GBP/USD": 1.3300,
+    "USD/JPY": 153.0000
+}
+
 INTERVAL = "15min"
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
+
+last_alert_times = {}  # Cache to prevent repeat alerts
+ALERT_COOLDOWN_MINUTES = 60
+
 
 def fetch_data(symbol):
     params = {
@@ -54,12 +65,16 @@ def fetch_data(symbol):
     df = df.sort_index()
     return df
 
+
 def compute_indicators(df):
     df["EMA 10"] = EMAIndicator(df["close"], window=10).ema_indicator()
     df["EMA 50"] = EMAIndicator(df["close"], window=50).ema_indicator()
     df["RSI"] = RSIIndicator(df["close"], window=14).rsi()
     df["ATR"] = AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range()
+    df["Support"] = df["close"] - 2 * df["ATR"]
+    df["Resistance"] = df["close"] + 2 * df["ATR"]
     return df
+
 
 def insert_to_postgres(rows):
     try:
@@ -77,21 +92,11 @@ def insert_to_postgres(rows):
             print("Inserting row:", row)
             cur.execute("""
                 INSERT INTO forex_history (
-                   id, timestamp, pair, open, high, low, close, ema10, ema50, rsi, atr, support, resistance
+                 timestamp, pair, open, high, low, close, ema10, ema50, rsi, atr, support, resistance
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (row["id"],
-                row["timestamp"],
-                row["pair"],
-                row["open"],
-                row["high"],
-                row["low"],
-                row["close"],
-                row["EMA 10"],
-                row["EMA 50"],
-                row["RSI"],
-                row["ATR"],
-                row["support"],
-                row["resistance"]
+            """, (
+                row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
+                row["EMA 10"], row["EMA 50"], row["RSI"], row["ATR"], row["support"], row["resistance"]
             ))
         conn.commit()
         cur.close()
@@ -99,7 +104,7 @@ def insert_to_postgres(rows):
         print("✅ PostgreSQL updated.")
     except Exception as e:
         print("❌ PostgreSQL error:", e)
-        traceback.print_exc()
+
 
 def append_to_google_sheets(rows):
     try:
@@ -113,18 +118,9 @@ def append_to_google_sheets(rows):
         print("✅ Connected. Appending rows...")
         for row in rows:
             print("Appending row:", row)
-            ws.append_row([row["timestamp"].strftime("%Y-%m-%d"),
-                row["pair"],
-                row["close"],
-                row["high"],
-                row["low"],
-                row["close"],
-                row["EMA 10"],
-                row["EMA 50"],
-                row["RSI"],
-                row["ATR"],
-                row["support"],
-                row["resistance"]
+            ws.append_row([
+                row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), row["pair"], row["close"], row["high"], row["low"],
+                row["close"], row["EMA 10"], row["EMA 50"], row["RSI"], row["ATR"], row["support"], row["resistance"]
             ])
         print("✅ Google Sheets updated successfully.")
     except Exception as e:
@@ -135,10 +131,26 @@ def send_telegram_alert(rows):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     bot = telegram.Bot(token=token)
+    now = datetime.utcnow()
+
     for row in rows:
-        if row["RSI"] < 30 or row["RSI"] > 70:
-            msg = f"⚠️ {row['pair']} ALERT\nPrice: {row['close']:.4f}\nRSI: {row['RSI']:.2f}\nTime: {row['timestamp']}"
-            bot.send_message(chat_id=chat_id, text=msg)
+        pair = row["pair"]
+        price = row["close"]
+        rsi = row["RSI"]
+        threshold = THRESHOLDS[pair]
+
+        # Alert key
+        alert_key = (pair, "above" if price > threshold else "below")
+        last_alert_time = last_alert_times.get(alert_key)
+
+        if last_alert_time and (now - last_alert_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES)):
+            continue  # Skip repeated alert
+
+        alert_msg = f"🚨 {pair} {'ABOVE' if price > threshold else 'BELOW'} {threshold:.4f} at {price:.4f}\n"
+        alert_msg += f"\n⚠️ {pair} ALERT\nPrice: {price:.4f}\nRSI: {rsi:.2f}\nTime: {row['timestamp']}\n#forex #RSI #EMA"
+        bot.send_message(chat_id=chat_id, text=alert_msg)
+        last_alert_times[alert_key] = now
+
 
 def main():
     all_data = []
@@ -157,14 +169,15 @@ def main():
             "EMA 50": latest["EMA 50"],
             "RSI": latest["RSI"],
             "ATR": latest["ATR"],
-            "support": None,
-            "resistance": None
+            "support": latest["Support"],
+            "resistance": latest["Resistance"]
         }
         all_data.append(row)
 
     insert_to_postgres(all_data)
     append_to_google_sheets(all_data)
     send_telegram_alert(all_data)
+
 
 if __name__ == "__main__":
     main()
