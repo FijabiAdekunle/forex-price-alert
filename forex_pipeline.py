@@ -77,9 +77,9 @@ def insert_to_postgres(rows):
             print("Inserting row:", row)
             cur.execute("""
                 INSERT INTO forex_history (
-                    timestamp, pair, open, high, low, close, ema10, ema50, rsi, atr, support, resistance
+                   id, timestamp, pair, open, high, low, close, ema10, ema50, rsi, atr, support, resistance
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
+            """, (row["id"],
                 row["timestamp"],
                 row["pair"],
                 row["open"],
@@ -99,6 +99,7 @@ def insert_to_postgres(rows):
         print("✅ PostgreSQL updated.")
     except Exception as e:
         print("❌ PostgreSQL error:", e)
+        traceback.print_exc()
 
 def append_to_google_sheets(rows):
     try:
@@ -112,8 +113,7 @@ def append_to_google_sheets(rows):
         print("✅ Connected. Appending rows...")
         for row in rows:
             print("Appending row:", row)
-            ws.append_row([
-                row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+            ws.append_row([row["timestamp"].strftime("%Y-%m-%d"),
                 row["pair"],
                 row["close"],
                 row["high"],
