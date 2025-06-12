@@ -63,6 +63,7 @@ def compute_indicators(df):
 
 def insert_to_postgres(rows):
     try:
+        print("🔄 Connecting to Supabase PostgreSQL...")
         conn = psycopg2.connect(
             host=os.getenv("PG_HOST"),
             port=os.getenv("PG_PORT"),
@@ -70,8 +71,10 @@ def insert_to_postgres(rows):
             user=os.getenv("PG_USER"),
             password=os.getenv("PG_PASSWORD")
         )
+        print("✅ Connected to DB.")
         cur = conn.cursor()
         for row in rows:
+            print("Inserting row:", row)
             cur.execute("""
                 INSERT INTO forex_history (
                     timestamp, pair, open, high, low, close, ema10, ema50, rsi, atr, support, resistance
@@ -93,8 +96,9 @@ def insert_to_postgres(rows):
         conn.commit()
         cur.close()
         conn.close()
+        print("✅ PostgreSQL updated.")
     except Exception as e:
-        print("PostgreSQL error:", e)
+        print("❌ PostgreSQL error:", e)
 
 def append_to_google_sheets(rows):
     try:
