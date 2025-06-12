@@ -118,18 +118,18 @@ def append_to_google_sheets(rows):
         print("✅ Connected. Appending rows...")
         for row in rows:
             print("Appending row:", row)
-            ws.append_row([(row["timestamp"] + pd.Timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
-                            row["pair"],
-                            row["open"],
-                            row["high"],
-                            row["low"],
-                            row["close"],
-                            row["ema 10"],
-                            row["ema 50"],
-                            row["rsi"],
-                            row["atr"],
-                            row["support"], 
-                            row["resistance"]
+            ws.append_row([(row["Timestamp"] + pd.Timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                            row["Pair"],
+                            row["Open"],
+                            row["High"],
+                            row["Low"],
+                            row["Close"],
+                            row["EMA 10"],
+                            row["EMA 50"],
+                            row["RSI"],
+                            row["ATR"],
+                            row["Support"], 
+                            row["Resistance"]
                             ])
         print("✅ Google Sheets updated successfully.")
     except Exception as e:
