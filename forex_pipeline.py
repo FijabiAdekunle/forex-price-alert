@@ -1,4 +1,4 @@
-import os 
+import os
 import json
 import requests
 import pandas as pd
@@ -31,6 +31,7 @@ TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 
 last_alert_times = {}  # Cache to prevent repeat alerts
 ALERT_COOLDOWN_MINUTES = 60
+LOCAL_OFFSET_HOURS = 1
 
 
 def fetch_data(symbol):
@@ -78,7 +79,7 @@ def compute_indicators(df):
 
 def insert_to_postgres(rows):
     try:
-        print("🔄 Connecting to Supabase PostgreSQL...")
+        print("\U0001F504 Connecting to Supabase PostgreSQL...")
         conn = psycopg2.connect(
             host=os.getenv("PG_HOST"),
             port=os.getenv("PG_PORT"),
@@ -108,7 +109,7 @@ def insert_to_postgres(rows):
 
 def append_to_google_sheets(rows):
     try:
-        print("🔄 Connecting to Google Sheets...")
+        print("\U0001F504 Connecting to Google Sheets...")
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds_dict = json.loads(os.getenv("GSPREAD_KEY_JSON"))
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -117,20 +118,21 @@ def append_to_google_sheets(rows):
         ws = sheet.sheet1
         print("✅ Connected. Appending rows...")
         for row in rows:
-            print("Appending row:", row)
-            ws.append_row([(row["Timestamp"] + pd.Timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
-                            row["Pair"],
-                            row["Rate"],
-                            row["High"],
-                            row["Low"],
-                            row["Close"],
-                            row["EMA 10"],
-                            row["EMA 50"],
-                            row["RSI"],
-                            row["ATR"],
-                            row["Support"], 
-                            row["Resistance"]
-                            ])
+            timestamp_local = row["timestamp"] + pd.Timedelta(hours=LOCAL_OFFSET_HOURS)
+            ws.append_row([
+                timestamp_local.strftime("%Y-%m-%d %H:%M:%S"),
+                row["pair"],
+                row["open"],
+                row["high"],
+                row["low"],
+                row["close"],
+                row["EMA 10"],
+                row["EMA 50"],
+                row["RSI"],
+                row["ATR"],
+                row["support"],
+                row["resistance"]
+            ])
         print("✅ Google Sheets updated successfully.")
     except Exception as e:
         print("❌ Google Sheets error:", e)
@@ -147,16 +149,27 @@ def send_telegram_alert(rows):
         price = row["close"]
         rsi = row["RSI"]
         threshold = THRESHOLDS[pair]
+        support = row["support"]
+        resistance = row["resistance"]
 
-        # Alert key
         alert_key = (pair, "above" if price > threshold else "below")
         last_alert_time = last_alert_times.get(alert_key)
 
         if last_alert_time and (now - last_alert_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES)):
             continue  # Skip repeated alert
 
-        alert_msg = f"🚨 {pair} {'ABOVE' if price > threshold else 'BELOW'} {threshold:.4f} at {price:.4f}\n"
-        alert_msg += f"\n⚠️ {pair} ALERT\nPrice: {price:.4f}\nRSI: {rsi:.2f}\nTime: {row['timestamp']}\n#forex #RSI #EMA"
+        timestamp_local = row["timestamp"] + pd.Timedelta(hours=LOCAL_OFFSET_HOURS)
+        alert_msg = f"\U0001F6A8 {pair} {'ABOVE' if price > threshold else 'BELOW'} {threshold:.4f} at {price:.4f}\n"
+        alert_msg += f"\n⚠️ {pair} ALERT\nPrice: {price:.4f}\nRSI: {rsi:.2f}\nTime: {timestamp_local.strftime('%Y-%m-%d %H:%M:%S')}"
+
+        # Optional dynamic S/R tagging
+        if price <= support:
+            alert_msg += "\n📉 Price at or below support zone"
+        elif price >= resistance:
+            alert_msg += "\n📈 Price at or above resistance zone"
+
+        alert_msg += "\n#forex #RSI #EMA"
+
         bot.send_message(chat_id=chat_id, text=alert_msg)
         last_alert_times[alert_key] = now
 
