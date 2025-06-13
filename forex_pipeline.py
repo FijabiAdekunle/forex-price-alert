@@ -29,7 +29,7 @@ THRESHOLDS = {
 INTERVAL = "15min"
 TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
 
-last_alert_times = {}  # Cache to prevent repeat alerts
+last_alert_times = {}
 ALERT_COOLDOWN_MINUTES = 60
 LOCAL_OFFSET_HOURS = 1
 
@@ -131,7 +131,10 @@ def append_to_google_sheets(rows):
                 row["RSI"],
                 row["ATR"],
                 row["support"],
-                row["resistance"]
+                row["resistance"],
+                row.get("trend_direction", ""),
+                row.get("sentiment_summary", ""),
+                row.get("news_summary", "")
             ])
         print("✅ Google Sheets updated successfully.")
     except Exception as e:
@@ -151,28 +154,91 @@ def send_telegram_alert(rows):
         threshold = THRESHOLDS[pair]
         support = row["support"]
         resistance = row["resistance"]
+        trend = row.get("trend_direction", "")
+        sentiment = row.get("sentiment_summary", "")
+        news = row.get("news_summary", "")
 
         alert_key = (pair, "above" if price > threshold else "below")
         last_alert_time = last_alert_times.get(alert_key)
 
         if last_alert_time and (now - last_alert_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES)):
-            continue  # Skip repeated alert
+            continue
 
         timestamp_local = row["timestamp"] + pd.Timedelta(hours=LOCAL_OFFSET_HOURS)
         alert_msg = f"\U0001F6A8 {pair} {'ABOVE' if price > threshold else 'BELOW'} {threshold:.4f} at {price:.4f}\n"
-        alert_msg += f"\n⚠️ {pair} ALERT\nPrice: {price:.4f}\nRSI: {rsi:.2f}\nTime: {timestamp_local.strftime('%Y-%m-%d %H:%M:%S')}"
+        alert_msg += f"\n🕒 {timestamp_local.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        alert_msg += f"Price: {price:.4f} | RSI: {rsi:.2f}\nTrend: {trend}\n"
 
-        # Optional dynamic S/R tagging
         if price <= support:
             alert_msg += "\n📉 Price at or below support zone"
         elif price >= resistance:
             alert_msg += "\n📈 Price at or above resistance zone"
+
+        if sentiment:
+            alert_msg += f"\n🧠 Sentiment: {sentiment}"
+        if news:
+            alert_msg += f"\n📰 News: {news}"
 
         alert_msg += "\n#forex #RSI #EMA"
 
         bot.send_message(chat_id=chat_id, text=alert_msg)
         last_alert_times[alert_key] = now
 
+def send_news_and_sentiment_alerts():
+    print("\U0001F4F0 Fetching news and sentiment alerts...")
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    bot = telegram.Bot(token=token)
+    now = datetime.utcnow()
+    hour = now.hour
+
+    # Send only at 06:00 or 18:00 UTC
+    if hour not in [6, 18]:
+        return
+
+    headers = []
+    for pair in PAIRS:
+        symbol = PAIRS[pair].replace("/", "")
+        # --- News ---
+        news_url = "https://api.twelvedata.com/news"
+        news_params = {
+            "symbol": symbol,
+            "apikey": os.getenv("TWELVE_DATA_API_KEY"),
+            "limit": 3
+        }
+        try:
+            news_res = requests.get(news_url, params=news_params)
+            news_data = news_res.json()
+            if "data" in news_data:
+                for item in news_data["data"]:
+                    published_time = item["date_published"]
+                    headline = item["title"]
+                    source = item["source"]
+                    link = item["url"]
+                    headers.append(f"\U0001F4F0 *{pair} News*\n• {headline}\n_Source: {source}_\n[Read More]({link})")
+        except Exception as e:
+            print(f"❌ News fetch error for {pair}:", e)
+
+        # --- Sentiment ---
+        sentiment_url = f"https://api.twelvedata.com/sentiment"
+        sentiment_params = {
+            "symbol": symbol,
+            "apikey": os.getenv("TWELVE_DATA_API_KEY")
+        }
+        try:
+            sent_res = requests.get(sentiment_url, params=sentiment_params)
+            sent_data = sent_res.json()
+            if "data" in sent_data and len(sent_data["data"]) > 0:
+                sentiment_score = sent_data["data"][0].get("sentiment", "N/A")
+                headers.append(f"\U0001F4AC *{pair} Sentiment*: _{sentiment_score}_")
+        except Exception as e:
+            print(f"❌ Sentiment fetch error for {pair}:", e)
+
+    if headers:
+        bot.send_message(chat_id=chat_id, text="\n\n".join(headers), parse_mode=telegram.constants.ParseMode.MARKDOWN)
+        print("✅ News and sentiment alerts sent.")
+    else:
+        print("⚠️ No news or sentiment alerts found.")
 
 def main():
     all_data = []
@@ -199,7 +265,10 @@ def main():
     insert_to_postgres(all_data)
     append_to_google_sheets(all_data)
     send_telegram_alert(all_data)
+    send_news_and_sentiment_alerts() 
 
 
-if __name__ == "__main__":
-    main()
+
+
+
+
