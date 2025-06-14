@@ -266,8 +266,7 @@ def main():
     append_to_google_sheets(all_data)
     send_telegram_alert(all_data)
     send_news_and_sentiment_alerts() 
-    if __name__ == "__main__":
-          main()
+    main()
 
 
 
