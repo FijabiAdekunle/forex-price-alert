@@ -1,148 +1,206 @@
 import os
+import json
 import requests
 import pandas as pd
-import telegram
-from datetime import datetime
-from dotenv import load_dotenv
+from datetime import datetime, timedelta
 from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
+import psycopg2
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import psycopg2
+import telegram
+from dotenv import load_dotenv
 
 load_dotenv()
 
 PAIRS = {
-    "EUR/USD": "EURUSD",
-    "GBP/USD": "GBPUSD",
-    "USD/JPY": "USDJPY"
+    "EUR/USD": "EUR/USD",
+    "GBP/USD": "GBP/USD",
+    "USD/JPY": "USD/JPY"
 }
 
-# === Fetch Forex Data ===
+THRESHOLDS = {
+    "EUR/USD": 1.1200,
+    "GBP/USD": 1.3300,
+    "USD/JPY": 153.0000
+}
+
+INTERVAL = "15min"
+TWELVE_DATA_URL = "https://api.twelvedata.com/time_series"
+
+last_alert_times = {}
+ALERT_COOLDOWN_MINUTES = 60
+LOCAL_OFFSET_HOURS = 1
+
+
 def fetch_data(symbol):
-    url = f"https://api.twelvedata.com/time_series"
+    print(f"🔍 Fetching data for {symbol}...")
     params = {
         "symbol": symbol,
-        "interval": "15min",
+        "interval": INTERVAL,
         "apikey": os.getenv("TWELVE_DATA_API_KEY"),
-        "outputsize": 100
+        "outputsize": 50,
+        "format": "JSON"
     }
-    res = requests.get(url, params=params)
-    data = res.json()
-    df = pd.DataFrame(data["values"])
-    df = df.rename(columns={"datetime": "timestamp"})
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.set_index("timestamp").sort_index()
-    df = df.astype(float)
-    return df
-
-# === Compute Indicators ===
-def compute_indicators(df):
-    df["EMA 10"] = EMAIndicator(close=df["close"], window=10).ema_indicator()
-    df["EMA 50"] = EMAIndicator(close=df["close"], window=50).ema_indicator()
-    df["RSI"] = RSIIndicator(close=df["close"], window=14).rsi()
-    df["ATR"] = AverageTrueRange(high=df["high"], low=df["low"], close=df["close"]).average_true_range()
-    df["Support"] = df["low"].rolling(window=10).min()
-    df["Resistance"] = df["high"].rolling(window=10).max()
-    return df
-
-# === TradingView Sentiment ===
-def get_tradingview_sentiment(symbol):
     try:
-        url = "https://symbol-screener.tradingview.com/forex/scan"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "symbols": {"tickers": [f"FX:{symbol}"], "query": {"types": []}},
-            "columns": ["technical_analysis_summary"]
-        }
-        res = requests.post(url, headers=headers, json=payload)
-        data = res.json()
-        summary = data["data"][0]["d"][0] if data["data"] else "N/A"
-        return summary
-    except Exception as e:
-        return f"Error: {e}"
+        r = requests.get(TWELVE_DATA_URL, params=params, timeout=10)
+        data = r.json()
+        if "values" not in data:
+            print(f"❌ API response missing 'values' for {symbol}: {data}")
+            return None
 
-# === Telegram Alert ===
-def send_telegram_alert(data):
+        df = pd.DataFrame(data["values"])
+        df = df.rename(columns={
+            "datetime": "timestamp",
+            "open": "open",
+            "high": "high",
+            "low": "low",
+            "close": "close"
+        })
+        df = df.astype({
+            "open": "float",
+            "high": "float",
+            "low": "float",
+            "close": "float"
+        })
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df.set_index("timestamp", inplace=True)
+        df = df.sort_index()
+        return df
+    except Exception as e:
+        print(f"❌ Exception fetching {symbol}: {e}")
+        return None
+
+
+def compute_indicators(df):
+    df["EMA 10"] = EMAIndicator(df["close"], window=10).ema_indicator()
+    df["EMA 50"] = EMAIndicator(df["close"], window=50).ema_indicator()
+    df["RSI"] = RSIIndicator(df["close"], window=14).rsi()
+    df["ATR"] = AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range()
+    df["Support"] = df["close"] - 2 * df["ATR"]
+    df["Resistance"] = df["close"] + 2 * df["ATR"]
+    return df
+
+
+def insert_to_postgres(rows):
+    try:
+        print("🗃️ Connecting to Supabase PostgreSQL...")
+        conn = psycopg2.connect(
+            host=os.getenv("PG_HOST"),
+            port=os.getenv("PG_PORT"),
+            database=os.getenv("PG_DB"),
+            user=os.getenv("PG_USER"),
+            password=os.getenv("PG_PASSWORD")
+        )
+        print("✅ Connected to DB.")
+        cur = conn.cursor()
+        for row in rows:
+            print("➕ Inserting row:", row)
+            cur.execute("""
+                INSERT INTO forex_history (
+                    timestamp, pair, open, high, low, close, ema10, ema50, rsi, atr, support, resistance
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
+                row["EMA 10"], row["EMA 50"], row["RSI"], row["ATR"], row["support"], row["resistance"]
+            ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ PostgreSQL updated.")
+    except Exception as e:
+        print("❌ PostgreSQL error:", e)
+
+
+def append_to_google_sheets(rows):
+    try:
+        print("📄 Connecting to Google Sheets...")
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(os.getenv("GSPREAD_KEY_JSON"))
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1n6CtgC-niE5NYCMsA_MLNOwy_79ID_2oMnTP64DUx28/edit")
+        ws = sheet.sheet1
+        print("✅ Connected. Appending rows...")
+        for row in rows:
+            timestamp_local = row["timestamp"] + pd.Timedelta(hours=LOCAL_OFFSET_HOURS)
+            ws.append_row([
+                timestamp_local.strftime("%Y-%m-%d %H:%M:%S"),
+                row["pair"],
+                row["open"],
+                row["high"],
+                row["low"],
+                row["close"],
+                row["EMA 10"],
+                row["EMA 50"],
+                row["RSI"],
+                row["ATR"],
+                row["support"],
+                row["resistance"],
+                row.get("trend_direction", ""),
+                row.get("sentiment_summary", ""),
+                row.get("news_summary", "")
+            ])
+        print("✅ Google Sheets updated successfully.")
+    except Exception as e:
+        print("❌ Google Sheets error:", e)
+
+
+def send_telegram_alert(rows):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        print("Missing Telegram credentials")
-        return
-
     bot = telegram.Bot(token=token)
-    for row in data:
-        msg = (
-            f"\U0001F4C8 *{row['pair']} Update*\n"
-            f"Price: {row['close']} | RSI: {round(row['RSI'], 2)}\n"
-            f"EMA10: {round(row['EMA 10'], 2)} | EMA50: {round(row['EMA 50'], 2)}\n"
-            f"ATR: {round(row['ATR'], 2)} | S: {round(row['support'], 2)} | R: {round(row['resistance'], 2)}\n"
-            f"\U0001F4AC Sentiment: _{row['sentiment_summary']}_\n"
-            f"\U0001F4F0 News: _{row['news_summary']}_")
-        bot.send_message(chat_id=chat_id, text=msg, parse_mode=telegram.constants.ParseMode.MARKDOWN)
+    now = datetime.utcnow()
 
-# === Append to Google Sheets ===
-def append_to_google_sheets(data):
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(os.getenv("GSPREAD_KEY_JSON"), scope)
-    client = gspread.authorize(creds)
-    sheet = client.open(os.getenv("GOOGLE_SHEET_NAME")).sheet1
+    for row in rows:
+        pair = row["pair"]
+        price = row["close"]
+        rsi = row["RSI"]
+        threshold = THRESHOLDS[pair]
+        support = row["support"]
+        resistance = row["resistance"]
+        trend = row.get("trend_direction", "")
+        sentiment = row.get("sentiment_summary", "")
+        news = row.get("news_summary", "")
 
-    for row in data:
-        sheet.append_row([
-            row['timestamp'].strftime("%Y-%m-%d %H:%M:%S"), row['pair'], row['open'], row['high'], row['low'], row['close'],
-            row['EMA 10'], row['EMA 50'], row['RSI'], row['ATR'], row['support'], row['resistance'],
-            row['sentiment_summary'], row['news_summary']
-        ])
+        alert_key = (pair, "above" if price > threshold else "below")
+        last_alert_time = last_alert_times.get(alert_key)
 
-# === Insert into PostgreSQL ===
-def insert_to_postgres(data):
-    conn = psycopg2.connect(
-        dbname=os.getenv("PG_DB"),
-        user=os.getenv("PG_USER"),
-        password=os.getenv("PG_PASSWORD"),
-        host=os.getenv("PG_HOST"),
-        port=os.getenv("PG_PORT")
-    )
-    cur = conn.cursor()
-    for row in data:
-        cur.execute("""
-            INSERT INTO forex_history (timestamp, pair, open, high, low, close,
-                ema10, ema50, rsi, atr, support, resistance, sentiment, news)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
-        """, (
-            row['timestamp'], row['pair'], row['open'], row['high'], row['low'], row['close'],
-            row['EMA 10'], row['EMA 50'], row['RSI'], row['ATR'], row['support'], row['resistance'],
-            row['sentiment_summary'], row['news_summary']
-        ))
-    conn.commit()
-    cur.close()
-    conn.close()
+        if last_alert_time and (now - last_alert_time < timedelta(minutes=ALERT_COOLDOWN_MINUTES)):
+            continue
 
-# === Optional: Use Twelve Data for News if needed ===
-def fetch_latest_news(symbol):
-    try:
-        url = "https://api.twelvedata.com/news"
-        res = requests.get(url, params={"symbol": symbol, "apikey": os.getenv("TWELVE_DATA_API_KEY"), "limit": 1})
-        news = res.json()
-        if "data" in news and news["data"]:
-            return news["data"][0]["title"]
-    except:
-        pass
-    return "No news found"
+        timestamp_local = row["timestamp"] + pd.Timedelta(hours=LOCAL_OFFSET_HOURS)
+        alert_msg = f"\U0001F6A8 {pair} {'ABOVE' if price > threshold else 'BELOW'} {threshold:.4f} at {price:.4f}\n"
+        alert_msg += f"\n🕒 {timestamp_local.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        alert_msg += f"Price: {price:.4f} | RSI: {rsi:.2f}\nTrend: {trend}\n"
 
-# === Main Execution ===
+        if price <= support:
+            alert_msg += "\n📉 Price at or below support zone"
+        elif price >= resistance:
+            alert_msg += "\n📈 Price at or above resistance zone"
+
+        if sentiment:
+            alert_msg += f"\n🧠 Sentiment: {sentiment}"
+        if news:
+            alert_msg += f"\n📰 News: {news}"
+
+        alert_msg += "\n#forex #RSI #EMA"
+
+        bot.send_message(chat_id=chat_id, text=alert_msg)
+        last_alert_times[alert_key] = now
+
+
 def main():
     all_data = []
     for pair, symbol in PAIRS.items():
         df = fetch_data(symbol)
+        if df is None or df.empty:
+            print(f"⚠️ Skipping {pair} due to missing data.")
+            continue
+
         df = compute_indicators(df)
         latest = df.iloc[-1]
-        sentiment = get_tradingview_sentiment(symbol)
-        news = fetch_latest_news(symbol)
-
         row = {
             "timestamp": latest.name,
             "pair": pair,
@@ -155,15 +213,17 @@ def main():
             "RSI": latest["RSI"],
             "ATR": latest["ATR"],
             "support": latest["Support"],
-            "resistance": latest["Resistance"],
-            "sentiment_summary": sentiment,
-            "news_summary": news
+            "resistance": latest["Resistance"]
         }
         all_data.append(row)
 
-    insert_to_postgres(all_data)
-    append_to_google_sheets(all_data)
-    send_telegram_alert(all_data)
+    if all_data:
+        insert_to_postgres(all_data)
+        append_to_google_sheets(all_data)
+        send_telegram_alert(all_data)
+    else:
+        print("❗ No data collected for any pair — skipping alerts.")
+
 
 if __name__ == "__main__":
     main()
