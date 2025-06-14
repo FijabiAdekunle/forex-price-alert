@@ -68,7 +68,10 @@ def compute_indicators(df):
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
-    df["atr"] = df[["high", "low", "close"]].apply(lambda x: max(x[0] - x[1], abs(x[0] - x[2]), abs(x[1] - x[2])), axis=1).rolling(14).mean()
+    df["atr"] = df[["high", "low", "close"]].apply(
+    lambda x: max(x.iloc[0] - x.iloc[1], abs(x.iloc[0] - x.iloc[2]), abs(x.iloc[1] - x.iloc[2])),
+    axis=1
+).rolling(14).mean()
     return df
 
 # Support/Resistance
@@ -172,7 +175,7 @@ def main():
         # Telegram alert
         try:
             bot = telegram.Bot(token=TELEGRAM_TOKEN)
-            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg)
+            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg)
         except Exception as e:
             log_message(f"Telegram send error: {e}")
 
