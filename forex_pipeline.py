@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from bs4 import BeautifulSoup
 import numpy as np
+import asyncio
 
 load_dotenv()
 
@@ -175,7 +176,7 @@ def main():
         # Telegram alert
         try:
             bot = telegram.Bot(token=TELEGRAM_TOKEN)
-            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg)
+            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg))
         except Exception as e:
             log_message(f"Telegram send error: {e}")
 
