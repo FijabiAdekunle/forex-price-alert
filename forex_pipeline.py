@@ -130,7 +130,7 @@ def main():
     rows = []
     for pair in PAIRS:
         try:
-            symbol = PAIRS[pair].replace("/", "")
+            symbol = PAIRS[pair]
             df = fetch_data(symbol)
             df = compute_indicators(df)
             support, resistance = detect_levels(df)
