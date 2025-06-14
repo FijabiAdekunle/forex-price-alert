@@ -1,8 +1,9 @@
-pandas
+beautifulsoup4
+lxml
 requests
-ta
-psycopg2-binary
+pandas
+python-telegram-bot
 gspread
 oauth2client
-python-telegram-bot==13.15
 python-dotenv
+psycopg2-binary
