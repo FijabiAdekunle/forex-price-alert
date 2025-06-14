@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+      TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
       PG_HOST: ${{ secrets.PG_HOST }}
       PG_PORT: ${{ secrets.PG_PORT }}
       PG_DB: ${{ secrets.PG_DB }}
