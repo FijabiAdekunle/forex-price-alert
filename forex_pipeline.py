@@ -15,9 +15,9 @@ import numpy as np
 load_dotenv()
 
 PAIRS = {
-    "EUR/USD": "EUR/USD",
-    "GBP/USD": "GBP/USD",
-    "USD/JPY": "USD/JPY"
+    "EUR/USD": "EURUSD",
+    "GBP/USD": "GBPUSD",
+    "USD/JPY": "USDJPY"
 }
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
