@@ -122,7 +122,7 @@ def send_telegram_alert(df, pair):
 def main():
     for pair, symbol in PAIRS.items():
         try:
-            df = fetch_data(symbol.replace("/", ""))
+            df = fetch_data(symbol)
             df = calculate_indicators(df)
             df["pair"] = pair
             push_to_postgres(df, pair)
