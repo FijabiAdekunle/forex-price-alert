@@ -1,130 +1,195 @@
+# forex_pipeline.py
+
 import os
-import requests
-import logging
-import psycopg2
 import pandas as pd
-import gspread
+import requests
 import telegram
-from datetime import datetime
-import asyncio
-from oauth2client.service_account import ServiceAccountCredentials
-
-import os
-import requests
-import pandas as pd
-import numpy as np
-import logging
-from datetime import datetime
 import psycopg2
 import gspread
+from datetime import datetime
+from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
-from telegram import Bot
+from bs4 import BeautifulSoup
+import numpy as np
 import asyncio
-from telegram.constants import ParseMode
-from sqlalchemy import create_engine
 
+load_dotenv()
 
-# Set up logging to file
-logging.basicConfig(
-    filename='log.txt',
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s: %(message)s',
-)
+PAIRS = {
+    "EUR/USD": "EUR/USD",
+    "GBP/USD": "GBP/USD",
+    "USD/JPY": "USD/JPY"
+}
 
-# Load environment variables
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POSTGRES_URL = os.getenv("POSTGRES_URL")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
-# Validate critical env vars
-if not POSTGRES_URL:
-    raise ValueError("POSTGRES_URL not set in environment")
-
-if not GOOGLE_SHEET_NAME:
-    raise ValueError("GOOGLE_SHEET_NAME not set in environment")
-
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# Google Sheets setup
+# Google Sheets Setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("gspread_key.json", scope)
 client = gspread.authorize(creds)
+sheet = client.open(GOOGLE_SHEET_NAME).sheet1
 
-try:
-    sheet = client.open(GOOGLE_SHEET_NAME).sheet1
-except Exception as e:
-    logging.error(f"Google Sheet open error: {e}")
-    sheet = None
+# Helper logging
 
-# Supabase/PSQL setup
-def insert_to_postgres(df, table="forex_history"):
+def log_message(msg):
+    print(f"[{datetime.utcnow()}] {msg}")
+
+# Fetch from Twelve Data (price only)
+
+def fetch_data(symbol):
+    api_key = os.getenv("TWELVE_DATA_API_KEY")
+    url = f"https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": "15min",
+        "outputsize": 50,
+        "apikey": api_key
+    }
+    res = requests.get(url, params=params)
+    data = res.json()
+    if "values" not in data:
+        raise ValueError(f"Twelve Data returned error: {data}")
+    df = pd.DataFrame(data["values"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values("datetime")
+    df.set_index("datetime", inplace=True)
+    df = df.astype(float)
+    return df
+
+# Compute indicators
+
+def compute_indicators(df):
+    df["ema10"] = df["close"].ewm(span=10).mean()
+    df["ema50"] = df["close"].ewm(span=50).mean()
+    delta = df["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    df["rsi"] = 100 - (100 / (1 + rs))
+    df["atr"] = df[["high", "low", "close"]].apply(
+    lambda x: max(x.iloc[0] - x.iloc[1], abs(x.iloc[0] - x.iloc[2]), abs(x.iloc[1] - x.iloc[2])),
+    axis=1
+).rolling(14).mean()
+    return df
+
+# Support/Resistance
+
+def detect_levels(df):
+    latest = df.iloc[-1]
+    support = df["low"].rolling(10).min().iloc[-1]
+    resistance = df["high"].rolling(10).max().iloc[-1]
+    return support, resistance
+
+# TradingView sentiment
+
+def fetch_tradingview_sentiment(pair):
     try:
-        import sqlalchemy
-        engine = sqlalchemy.create_engine(POSTGRES_URL)
-        df.to_sql(table, engine, if_exists="append", index=False)
-        logging.info("Data pushed to PostgreSQL")
+        symbol_map = {
+            "EUR/USD": "FX:EURUSD",
+            "GBP/USD": "FX:GBPUSD",
+            "USD/JPY": "FX:USDJPY"
+        }
+        symbol = symbol_map[pair]
+        url = f"https://www.tradingview.com/symbols/{symbol.replace(':', '-')}/technicals/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+        result_tag = soup.find("div", {"class": "speedometerSignal-pyzN--tL"})
+        if result_tag:
+            sentiment = result_tag.text.strip()
+            return sentiment
     except Exception as e:
-        logging.error(f"Supabase error: {e}")
+        log_message(f"TradingView sentiment error for {pair}: {e}")
+    return "N/A"
 
-# Telegram send
-async def send_telegram_alert(message):
+# Forex Factory news
+
+def fetch_forex_factory_news(pair):
     try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-        logging.info("Telegram alert sent")
+        response = requests.get("https://www.forexfactory.com/calendar", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        soup = BeautifulSoup(response.content, "html.parser")
+        today = datetime.utcnow().strftime("%a")
+        events = soup.find_all("tr", {"class": "calendar__row"})
+        headlines = []
+        for event in events:
+            if today not in event.text:
+                continue
+            if pair.split("/")[0] in event.text or pair.split("/")[1] in event.text:
+                impact = event.find("td", class_="impact")
+                if impact and "high" in impact.get("class", []):
+                    desc = event.find("td", class_="event")
+                    if desc:
+                        headlines.append(desc.text.strip())
+        return ", ".join(headlines[:3]) if headlines else "No major news"
     except Exception as e:
-        logging.error(f"Telegram send error: {e}")
+        log_message(f"ForexFactory news error for {pair}: {e}")
+    return "No news"
 
-# Main processing
+# Main pipeline
 
 def main():
-    pairs = ["EUR/USD", "GBP/USD", "USD/JPY"]
-
-    for pair in pairs:
+    rows = []
+    for pair in PAIRS:
         try:
-            # --- Replace with real fetching logic
-            response = requests.get(
-                f"https://api.twelvedata.com/time_series?symbol={pair}&interval=15min&apikey={TWELVE_DATA_API_KEY}&outputsize=1"
-            )
-            data = response.json()
-            if "values" not in data:
-                raise ValueError(f"Twelve Data returned error: {data}")
+            symbol = PAIRS[pair]
+            df = fetch_data(symbol)
+            df = compute_indicators(df)
+            support, resistance = detect_levels(df)
+            latest = df.iloc[-1]
+            trend = "Uptrend" if latest["ema10"] > latest["ema50"] else "Downtrend"
+            sentiment = fetch_tradingview_sentiment(pair)
+            news = fetch_forex_factory_news(pair)
 
-            df = pd.DataFrame(data["values"])
-            df["pair"] = pair
-            df["timestamp"] = pd.to_datetime(df["datetime"])
-            df["rsi"] = np.random.uniform(40, 70)  # Replace with real RSI
-            df["atr"] = np.random.uniform(0.5, 2.0)  # Replace with real ATR
-            df["trend"] = np.where(df["rsi"] > 50, "Uptrend", "Downtrend")
-            df["sentiment"] = "N/A"  # Placeholder for real sentiment
-            df["news"] = "No major news"  # Placeholder for real news
-
-            # --- Telegram alert
-            msg = (
-                f"🚨 {pair} {df['trend'].iloc[0].upper()}\n"
-                f"🕒 {df['timestamp'].iloc[0]}\n"
-                f"Price: {df['close'].iloc[0]} | RSI: {df['rsi'].iloc[0]:.2f}\n"
-                f"Trend: {df['trend'].iloc[0]}\n"
-                f"Sentiment: {df['sentiment'].iloc[0]}\n"
-                f"News: {df['news'].iloc[0]}\n#forex #RSI #EMA"
-            )
-            asyncio.run(send_telegram_alert(msg))
-
-            # --- Save to Google Sheet
-            if sheet:
-                row = [
-                    df['timestamp'].iloc[0], pair, df['open'].iloc[0], df['high'].iloc[0],
-                    df['low'].iloc[0], df['close'].iloc[0], df['rsi'].iloc[0], df['atr'].iloc[0],
-                    df['trend'].iloc[0], df['sentiment'].iloc[0], df['news'].iloc[0]
-                ]
-                sheet.append_row([str(x) for x in row])
-
-            # --- Push to Supabase
-            insert_to_postgres(df[["timestamp", "pair", "open", "high", "low", "close", "rsi", "atr", "trend"]])
-
+            row = {
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "pair": pair,
+                "open": latest["open"],
+                "high": latest["high"],
+                "low": latest["low"],
+                "close": latest["close"],
+                "ema10": latest["ema10"],
+                "ema50": latest["ema50"],
+                "rsi": latest["rsi"],
+                "atr": latest["atr"],
+                "support": support,
+                "resistance": resistance,
+                "trend_direction": trend,
+                "sentiment_summary": sentiment,
+                "news_summary": news
+            }
+            rows.append(row)
         except Exception as e:
-            logging.error(f"Error processing {pair}: {e}")
+            log_message(f"❌ Error processing {pair}: {e}")
+
+    for row in rows:
+        alert_msg = f"🚨 {row['pair']} {row['trend_direction'].upper()}\n"
+        alert_msg += f"🕒 {row['timestamp']}\n"
+        alert_msg += f"Price: {row['close']} | RSI: {round(row['rsi'], 2)}\n"
+        alert_msg += f"Trend: {row['trend_direction']}\n"
+        alert_msg += f"Sentiment: {row['sentiment_summary']}\n"
+        alert_msg += f"News: {row['news_summary']}\n"
+        alert_msg += "#forex #RSI #EMA"
+
+        # Telegram alert
+        try:
+            bot = telegram.Bot(token=TELEGRAM_TOKEN)
+            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg))
+        except Exception as e:
+            log_message(f"Telegram send error: {e}")
+
+        # Google Sheets
+        try:
+            sheet.append_row([
+                row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
+                row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
+                row["trend_direction"], row["sentiment_summary"], row["news_summary"]
+            ])
+        except Exception as e:
+            log_message(f"Google Sheets error: {e}")
 
 if __name__ == "__main__":
     main()
+
