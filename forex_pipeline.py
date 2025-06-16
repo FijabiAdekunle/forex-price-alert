@@ -368,4 +368,37 @@ async def main():
                     "ema10": latest["ema10"],
                     "ema50": latest["ema50"],
                     "ema_signal": latest["ema_signal"],
-                    "r
+                    "rsi": latest["rsi"],
+                    "atr": latest["atr"],
+                    "support": support,
+                    "resistance": resistance,
+                    "trend": trend,
+                    "sentiment": sentiment,
+                    "news": news,
+                    "fib_levels": json.dumps(fib_levels)
+                }
+                rows.append(row)
+                
+                # Send Telegram alert
+                await send_telegram_alert(row)
+                
+            except Exception as e:
+                log_message(f"Error processing {pair}: {str(e)}", "ERROR")
+                continue
+        
+        # Update databases
+        if rows:
+            update_supabase(db_conn, rows)
+            update_google_sheets(google_sheet, rows)
+            
+        log_message("Pipeline completed successfully")
+        
+    except Exception as e:
+        log_message(f"Pipeline failed: {str(e)}", "ERROR")
+        log_message(traceback.format_exc(), "DEBUG")
+    finally:
+        if 'db_conn' in locals():
+            db_conn.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
