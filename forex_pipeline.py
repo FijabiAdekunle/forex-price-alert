@@ -1,71 +1,96 @@
 import os
-import requests
+import asyncio
+import psycopg2
+import gspread
+import telegram
 import pandas as pd
 from datetime import datetime
+from oauth2client.service_account import ServiceAccountCredentials
 
-def fetch_data(symbol):
-    """Robust data fetching with proper error handling"""
+# Initialize services
+def init_services():
+    """Initialize all connections with error handling"""
+    services = {}
+    
+    # Telegram
     try:
-        api_key = os.getenv("TWELVE_DATA_API_KEY")
-        if not api_key:
-            raise ValueError("API key not found in environment variables")
-
-        params = {
-            "symbol": symbol,
-            "interval": "15min",
-            "apikey": api_key,
-            "outputsize": 5  # Reduced for testing
-        }
-
-        print(f"DEBUG: Attempting to fetch {symbol} with params: {params}")  # Debug line
-
-        response = requests.get(
-            "https://api.twelvedata.com/time_series",
-            params=params,
-            timeout=10
+        services['telegram'] = telegram.Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
+        print("✅ Telegram initialized")
+    except Exception as e:
+        print(f"❌ Telegram init failed: {str(e)}")
+    
+    # Supabase
+    try:
+        services['supabase'] = psycopg2.connect(
+            host=os.getenv("PG_HOST"),
+            port=os.getenv("PG_PORT"),
+            dbname=os.getenv("PG_DB"),
+            user=os.getenv("PG_USER"),
+            password=os.getenv("PG_PASSWORD"),
+            sslmode="require"
         )
-
-        print(f"DEBUG: Response status: {response.status_code}")  # Debug line
-        print(f"DEBUG: Response text: {response.text[:200]}")  # Debug line
-
-        response.raise_for_status()  # Raises HTTPError for bad responses
-        data = response.json()
-
-        if "values" not in data:
-            error_msg = data.get("message", "No 'values' in response")
-            raise ValueError(f"API Error: {error_msg}")
-
-        df = pd.DataFrame(data["values"])
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        df = df.sort_values("datetime")
-        df.set_index("datetime", inplace=True)
-        
-        numeric_cols = ["open", "high", "low", "close"]
-        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
-        
-        return df
-
+        print("✅ Supabase connected")
     except Exception as e:
-        print(f"❌ Critical error fetching {symbol}: {str(e)}")
-        raise
-
-def main():
-    print("=== Starting Debug Run ===")
+        print(f"❌ Supabase connection failed: {str(e)}")
     
-    # Verify environment
-    print("Environment variables:", {
-        k: v for k, v in os.environ.items() 
-        if "TWELVE" in k or "PG_" in k
-    })
-    
-    # Test with just one pair first
+    # Google Sheets
     try:
-        print("Testing EUR/USD...")
-        df = fetch_data("EUR/USD")
-        print("Success! Sample data:")
-        print(df.tail(2))
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            json.loads(os.getenv("GSPREAD_KEY_JSON")), scope)
+        services['sheets'] = gspread.authorize(creds)
+        print("✅ Google Sheets authorized")
     except Exception as e:
-        print(f"Failed with error: {e}")
+        print(f"❌ Google Sheets auth failed: {str(e)}")
+    
+    return services
+
+async def run_pipeline():
+    services = init_services()
+    
+    # 1. Fetch Data (from your working debug version)
+    df = fetch_data("EUR/USD")
+    latest = df.iloc[-1]
+    
+    # 2. Prepare data
+    data = {
+        "timestamp": datetime.utcnow(),
+        "pair": "EUR/USD",
+        "price": latest["close"],
+        # ... add other fields ...
+    }
+    
+    # 3. Send alerts and update services
+    try:
+        # Telegram
+        if 'telegram' in services:
+            await services['telegram'].send_message(
+                chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+                text=f"EUR/USD Price Alert: {latest['close']}"
+            )
+        
+        # Supabase
+        if 'supabase' in services:
+            with services['supabase'].cursor() as cur:
+                cur.execute("""
+                    INSERT INTO forex_history (timestamp, pair, close)
+                    VALUES (%s, %s, %s)
+                """, (data["timestamp"], data["pair"], data["price"]))
+                services['supabase'].commit()
+        
+        # Google Sheets
+        if 'sheets' in services:
+            sheet = services['sheets'].open(os.getenv("GOOGLE_SHEET_NAME")).sheet1
+            sheet.append_row([
+                data["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                data["pair"],
+                data["price"]
+            ])
+            
+        print("✅ Pipeline completed successfully")
+        
+    except Exception as e:
+        print(f"❌ Pipeline error: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(run_pipeline())
