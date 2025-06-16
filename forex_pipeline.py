@@ -11,6 +11,8 @@ from bs4 import BeautifulSoup
 import numpy as np
 import asyncio
 import traceback
+import json
+import time
 
 load_dotenv()
 
@@ -30,6 +32,21 @@ GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME")
 def log_message(msg, level="INFO"):
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {level}: {msg}")
+
+# Initialize Google Sheets
+def initialize_google_sheets():
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", 
+                "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            json.loads(os.getenv("GSPREAD_KEY_JSON")), scope)
+        client = gspread.authorize(creds)
+        sheet = client.open(GOOGLE_SHEET_NAME).sheet1
+        log_message("Google Sheets initialized successfully")
+        return sheet
+    except Exception as e:
+        log_message(f"Google Sheets initialization failed: {str(e)}", "ERROR")
+        raise
 
 # Database connection with retries
 def get_db_connection(retries=3, delay=2):
@@ -119,7 +136,7 @@ def detect_levels(df):
     support = df["low"].rolling(20).min().iloc[-1]
     resistance = df["high"].rolling(20).max().iloc[-1]
     
-    # Fibonacci levels (if you want to add them)
+    # Fibonacci levels
     recent_low = df["low"].iloc[-20:].min()
     recent_high = df["high"].iloc[-20:].max()
     fib_levels = {
@@ -146,6 +163,25 @@ def fetch_sentiment(pair):
         except Exception as e:
             log_message(f"{source_name} sentiment error for {pair}: {str(e)}", "WARNING")
     
+    return "N/A"
+
+def fetch_tradingview_sentiment(pair):
+    try:
+        symbol_map = {
+            "EUR/USD": "FX:EURUSD",
+            "GBP/USD": "FX:GBPUSD",
+            "USD/JPY": "FX:USDJPY"
+        }
+        symbol = symbol_map[pair]
+        url = f"https://www.tradingview.com/symbols/{symbol.replace(':', '-')}/technicals/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+        result_tag = soup.find("div", {"class": "speedometerSignal-pyzN--tL"})
+        if result_tag:
+            return result_tag.text.strip()
+    except Exception as e:
+        log_message(f"TradingView sentiment error: {str(e)}", "WARNING")
     return "N/A"
 
 def fetch_twelve_data_sentiment(pair):
@@ -182,6 +218,29 @@ def fetch_news(pair):
     
     return " | ".join(news_items[:3]) if news_items else "No major news"
 
+def fetch_forex_factory_news(pair):
+    try:
+        response = requests.get("https://www.forexfactory.com/calendar", 
+                             headers={"User-Agent": "Mozilla/5.0"}, 
+                             timeout=10)
+        soup = BeautifulSoup(response.content, "html.parser")
+        today = datetime.utcnow().strftime("%a")
+        events = soup.find_all("tr", {"class": "calendar__row"})
+        headlines = []
+        for event in events:
+            if today not in event.text:
+                continue
+            if pair.split("/")[0] in event.text or pair.split("/")[1] in event.text:
+                impact = event.find("td", class_="impact")
+                if impact and "high" in impact.get("class", []):
+                    desc = event.find("td", class_="event")
+                    if desc:
+                        headlines.append(desc.text.strip())
+        return ", ".join(headlines[:3]) if headlines else "No major news"
+    except Exception as e:
+        log_message(f"ForexFactory news error: {str(e)}", "WARNING")
+    return "No major news"
+
 def fetch_twelve_data_news(pair):
     try:
         symbol = pair.replace("/", "")
@@ -199,13 +258,85 @@ def fetch_twelve_data_news(pair):
         log_message(f"TwelveData news error: {str(e)}", "WARNING")
     return "No major news"
 
-# Main pipeline with enhanced features
+def update_google_sheets(sheet, rows):
+    try:
+        for row in rows:
+            sheet.append_row([
+                row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                row["pair"],
+                row["open"],
+                row["high"],
+                row["low"],
+                row["close"],
+                row["ema10"],
+                row["ema50"],
+                row["ema_signal"],
+                row["rsi"],
+                row["atr"],
+                row["support"],
+                row["resistance"],
+                row["trend"],
+                row["sentiment"],
+                row["news"],
+                row["fib_levels"]
+            ])
+        log_message(f"Successfully updated Google Sheets with {len(rows)} records")
+    except Exception as e:
+        log_message(f"Google Sheets update failed: {str(e)}", "ERROR")
+
+def update_supabase(conn, rows):
+    try:
+        with conn.cursor() as cur:
+            for row in rows:
+                cur.execute("""
+                    INSERT INTO forex_data (
+                        timestamp, pair, open, high, low, close,
+                        ema10, ema50, ema_signal, rsi, atr,
+                        support, resistance, trend, sentiment, news, fib_levels
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
+                    row["ema10"], row["ema50"], row["ema_signal"], row["rsi"], row["atr"],
+                    row["support"], row["resistance"], row["trend"], row["sentiment"], row["news"], row["fib_levels"]
+                ))
+        conn.commit()
+        log_message(f"Successfully updated Supabase with {len(rows)} records")
+    except Exception as e:
+        log_message(f"Supabase update failed: {str(e)}", "ERROR")
+        conn.rollback()
+
+async def send_telegram_alert(row):
+    try:
+        bot = telegram.Bot(token=TELEGRAM_TOKEN)
+        
+        # Prepare alert message with emoji based on trend
+        emoji = "📈" if row["trend"] == "Uptrend" else "📉" if row["trend"] == "Downtrend" else "➡️"
+        message = f"{emoji} <b>{row['pair']} {row['trend'].upper()}</b>\n"
+        message += f"🕒 {row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+        message += f"Price: {row['close']:.5f} | RSI: {row['rsi']:.2f}\n"
+        message += f"EMA10/50: {row['ema10']:.5f}/{row['ema50']:.5f}\n"
+        message += f"ATR: {row['atr']:.5f}\n"
+        message += f"Support: {row['support']:.5f} | Resistance: {row['resistance']:.5f}\n"
+        message += f"Sentiment: {row['sentiment']}\n"
+        message += f"News: {row['news']}\n"
+        message += "#forex #alerts"
+        
+        await bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=message,
+            parse_mode="HTML"
+        )
+        log_message(f"Sent Telegram alert for {row['pair']}")
+        
+    except Exception as e:
+        log_message(f"Telegram alert failed: {str(e)}", "ERROR")
+
 async def main():
     try:
         log_message("Starting forex pipeline")
         
         # Initialize services
-        google_sheet = await initialize_google_sheets()
+        google_sheet = initialize_google_sheets()
         db_conn = get_db_connection()
         
         rows = []
@@ -237,83 +368,4 @@ async def main():
                     "ema10": latest["ema10"],
                     "ema50": latest["ema50"],
                     "ema_signal": latest["ema_signal"],
-                    "rsi": latest["rsi"],
-                    "atr": latest["atr"],
-                    "support": support,
-                    "resistance": resistance,
-                    "trend": trend,
-                    "sentiment": sentiment,
-                    "news": news,
-                    "fib_levels": json.dumps(fib_levels)
-                }
-                rows.append(row)
-                
-                # Send Telegram alert
-                await send_telegram_alert(row)
-                
-            except Exception as e:
-                log_message(f"Error processing {pair}: {str(e)}", "ERROR")
-                continue
-        
-        # Update databases
-        if rows:
-            update_supabase(db_conn, rows)
-            update_google_sheets(google_sheet, rows)
-            
-        log_message("Pipeline completed successfully")
-        
-    except Exception as e:
-        log_message(f"Pipeline failed: {str(e)}", "ERROR")
-        log_message(traceback.format_exc(), "DEBUG")
-    finally:
-        if 'db_conn' in locals():
-            db_conn.close()
-
-async def send_telegram_alert(row):
-    try:
-        bot = telegram.Bot(token=TELEGRAM_TOKEN)
-        
-        # Prepare alert message with emoji based on trend
-        emoji = "📈" if row["trend"] == "Uptrend" else "📉" if row["trend"] == "Downtrend" else "➡️"
-        message = f"{emoji} <b>{row['pair']} {row['trend'].upper()}</b>\n"
-        message += f"🕒 {row['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}\n"
-        message += f"Price: {row['close']:.5f} | RSI: {row['rsi']:.2f}\n"
-        message += f"EMA10/50: {row['ema10']:.5f}/{row['ema50']:.5f}\n"
-        message += f"ATR: {row['atr']:.5f}\n"
-        message += f"Support: {row['support']:.5f} | Resistance: {row['resistance']:.5f}\n"
-        message += f"Sentiment: {row['sentiment']}\n"
-        message += f"News: {row['news']}\n"
-        message += "#forex #alerts"
-        
-        await bot.send_message(
-            chat_id=TELEGRAM_CHAT_ID,
-            text=message,
-            parse_mode="HTML"
-        )
-        
-    except Exception as e:
-        log_message(f"Telegram alert failed: {str(e)}", "ERROR")
-
-def update_supabase(conn, rows):
-    try:
-        with conn.cursor() as cur:
-            for row in rows:
-                cur.execute("""
-                    INSERT INTO forex_data (
-                        timestamp, pair, open, high, low, close,
-                        ema10, ema50, ema_signal, rsi, atr,
-                        support, resistance, trend, sentiment, news, fib_levels
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
-                    row["ema10"], row["ema50"], row["ema_signal"], row["rsi"], row["atr"],
-                    row["support"], row["resistance"], row["trend"], row["sentiment"], row["news"], row["fib_levels"]
-                ))
-        conn.commit()
-        log_message(f"Successfully updated Supabase with {len(rows)} records")
-    except Exception as e:
-        log_message(f"Supabase update failed: {str(e)}", "ERROR")
-        conn.rollback()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                    "r
