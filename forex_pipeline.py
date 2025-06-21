@@ -1,5 +1,3 @@
-# forex_pipeline.py
-
 import os
 import pandas as pd
 import requests
@@ -12,8 +10,13 @@ from oauth2client.service_account import ServiceAccountCredentials
 from bs4 import BeautifulSoup
 import numpy as np
 import asyncio
+import logging
+from sqlalchemy import create_engine
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(filename="log.txt", level=logging.INFO, format='[%(asctime)s] %(message)s')
 
 PAIRS = {
     "EUR/USD": "EUR/USD",
@@ -32,12 +35,12 @@ creds = ServiceAccountCredentials.from_json_keyfile_name("gspread_key.json", sco
 client = gspread.authorize(creds)
 sheet = client.open(GOOGLE_SHEET_NAME).sheet1
 
-# Helper logging
-
+# Logging helper
 def log_message(msg):
     print(f"[{datetime.utcnow()}] {msg}")
+    logging.info(msg)
 
-# Fetch from Twelve Data (price only)
+# Fetch from Twelve Data
 
 def fetch_data(symbol):
     api_key = os.getenv("TWELVE_DATA_API_KEY")
@@ -59,31 +62,25 @@ def fetch_data(symbol):
     df = df.astype(float)
     return df
 
-# Compute indicators
+# Indicators
 
 def compute_indicators(df):
     df["ema10"] = df["close"].ewm(span=10).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
     delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
     df["atr"] = df[["high", "low", "close"]].apply(
-    lambda x: max(x.iloc[0] - x.iloc[1], abs(x.iloc[0] - x.iloc[2]), abs(x.iloc[1] - x.iloc[2])),
-    axis=1
-).rolling(14).mean()
+        lambda x: max(x[0] - x[1], abs(x[0] - x[2]), abs(x[1] - x[2])), axis=1
+    ).rolling(14).mean()
     return df
 
-# Support/Resistance
-
 def detect_levels(df):
-    latest = df.iloc[-1]
     support = df["low"].rolling(10).min().iloc[-1]
     resistance = df["high"].rolling(10).max().iloc[-1]
     return support, resistance
-
-# TradingView sentiment
 
 def fetch_tradingview_sentiment(pair):
     try:
@@ -99,13 +96,10 @@ def fetch_tradingview_sentiment(pair):
         soup = BeautifulSoup(response.text, "html.parser")
         result_tag = soup.find("div", {"class": "speedometerSignal-pyzN--tL"})
         if result_tag:
-            sentiment = result_tag.text.strip()
-            return sentiment
+            return result_tag.text.strip()
     except Exception as e:
         log_message(f"TradingView sentiment error for {pair}: {e}")
     return "N/A"
-
-# Forex Factory news
 
 def fetch_forex_factory_news(pair):
     try:
@@ -128,18 +122,31 @@ def fetch_forex_factory_news(pair):
         log_message(f"ForexFactory news error for {pair}: {e}")
     return "No news"
 
-# Main pipeline
+def insert_to_postgres(df):
+    try:
+        engine = create_engine(POSTGRES_URL)
+        df.to_sql("forex_history", engine, if_exists="append", index=False)
+        log_message("✅ Supabase updated")
+    except Exception as e:
+        log_message(f"❌ Supabase error: {e}")
+
+# Main
 
 def main():
     rows = []
     for pair in PAIRS:
         try:
-            symbol = PAIRS[pair]
+            symbol = PAIRS[pair].replace("/", "")
             df = fetch_data(symbol)
             df = compute_indicators(df)
             support, resistance = detect_levels(df)
             latest = df.iloc[-1]
             trend = "Uptrend" if latest["ema10"] > latest["ema50"] else "Downtrend"
+            crossover = (
+                "Golden Cross" if latest["ema10"] > latest["ema50"] and df["ema10"].iloc[-2] < df["ema50"].iloc[-2] else
+                "Death Cross" if latest["ema10"] < latest["ema50"] and df["ema10"].iloc[-2] > df["ema50"].iloc[-2] else
+                "No Crossover"
+            )
             sentiment = fetch_tradingview_sentiment(pair)
             news = fetch_forex_factory_news(pair)
 
@@ -156,39 +163,48 @@ def main():
                 "atr": latest["atr"],
                 "support": support,
                 "resistance": resistance,
-                "trend_direction": trend,
-                "sentiment_summary": sentiment,
-                "news_summary": news
+                "trend": trend,
+                "crossover": crossover,
+                "sentiment": sentiment,
+                "news": news
             }
             rows.append(row)
         except Exception as e:
             log_message(f"❌ Error processing {pair}: {e}")
 
     for row in rows:
-        alert_msg = f"🚨 {row['pair']} {row['trend_direction'].upper()}\n"
-        alert_msg += f"🕒 {row['timestamp']}\n"
-        alert_msg += f"Price: {row['close']} | RSI: {round(row['rsi'], 2)}\n"
-        alert_msg += f"Trend: {row['trend_direction']}\n"
-        alert_msg += f"Sentiment: {row['sentiment_summary']}\n"
-        alert_msg += f"News: {row['news_summary']}\n"
-        alert_msg += "#forex #RSI #EMA"
-
-        # Telegram alert
+        alert_msg = (
+            f"🚨 {row['pair']} {row['trend'].upper()}\n"
+            f"🕒 {row['timestamp']}\n"
+            f"Price: {row['close']} | RSI: {round(row['rsi'], 2)}\n"
+            f"EMA10: {round(row['ema10'], 5)} | EMA50: {round(row['ema50'], 5)}\n"
+            f"Crossover: {row['crossover']}\n"
+            f"ATR: {round(row['atr'], 4)} | Support: {round(row['support'], 4)} | Resistance: {round(row['resistance'], 4)}\n"
+            f"Sentiment: {row['sentiment']}\n"
+            f"News: {row['news']}\n"
+            f"#forex #RSI #EMA"
+        )
         try:
             bot = telegram.Bot(token=TELEGRAM_TOKEN)
             asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg))
+            log_message("✅ Telegram alert sent")
         except Exception as e:
             log_message(f"Telegram send error: {e}")
 
-        # Google Sheets
         try:
             sheet.append_row([
                 row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
                 row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
-                row["trend_direction"], row["sentiment_summary"], row["news_summary"]
+                row["trend"], row["crossover"], row["sentiment"], row["news"]
             ])
+            log_message("✅ Google Sheet updated")
         except Exception as e:
             log_message(f"Google Sheets error: {e}")
+
+        try:
+            insert_to_postgres(pd.DataFrame([row]))
+        except Exception as e:
+            log_message(f"Supabase insert error: {e}")
 
 if __name__ == "__main__":
     main()
