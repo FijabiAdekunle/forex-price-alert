@@ -4,8 +4,9 @@ import os
 import pandas as pd
 import requests
 import telegram
-import psycopg2
 import gspread
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
@@ -33,6 +34,30 @@ logging.basicConfig(filename="log.txt", level=logging.INFO, format="[%(asctime)s
 def log_message(msg):
     print(f"[{datetime.utcnow()}] {msg}")
     logging.info(msg)
+
+# Email alert
+
+def send_email_alert(subject, body):
+    try:
+        smtp_host = os.getenv("SMTP_HOST")
+        smtp_port = int(os.getenv("SMTP_PORT", 587))
+        smtp_user = os.getenv("SMTP_USER")
+        smtp_pass = os.getenv("SMTP_PASS")
+        to_email = os.getenv("ALERT_EMAIL")
+
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = smtp_user
+        msg["To"] = to_email
+
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(smtp_user, to_email, msg.as_string())
+
+        log_message("📧 Email alert sent")
+    except Exception as e:
+        log_message(f"Email alert failed: {e}")
 
 # Google Sheets Setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -135,8 +160,8 @@ def fetch_forex_factory_news(pair):
 
 def main():
     rows = []
-    for pair in PAIRS:
-        try:
+    try:
+        for pair in PAIRS:
             symbol = PAIRS[pair]
             df = fetch_data(symbol)
             df = compute_indicators(df)
@@ -174,34 +199,49 @@ def main():
                 "news_summary": news
             }
             rows.append(row)
-        except Exception as e:
-            log_message(f"❌ Error processing {pair}: {e}")
 
-    for row in rows:
-        alert_msg = f"🚨 {row['pair']} {row['trend_direction'].upper()}\n"
-        alert_msg += f"🕒 {row['timestamp']}\n"
-        alert_msg += f"Price: {row['close']} | RSI: {round(row['rsi'], 2)}\n"
-        alert_msg += f"EMA10: {round(row['ema10'], 5)} | EMA50: {round(row['ema50'], 5)}\n"
-        alert_msg += f"Crossover: {row['crossover']}\n"
-        alert_msg += f"ATR: {round(row['atr'], 4)} | Support: {round(row['support'], 4)} | Resistance: {round(row['resistance'], 4)}\n"
-        alert_msg += f"Sentiment: {row['sentiment_summary']}\n"
-        alert_msg += f"News: {row['news_summary']}\n"
-        alert_msg += "#forex #RSI #EMA"
+        for row in rows:
+            alert_msg = f"🚨 {row['pair']} {row['trend_direction'].upper()}\n"
+            alert_msg += f"🕒 {row['timestamp']}\n"
+            alert_msg += f"Price: {row['close']} | RSI: {round(row['rsi'], 2)}\n"
+            alert_msg += f"EMA10: {round(row['ema10'], 5)} | EMA50: {round(row['ema50'], 5)}\n"
+            alert_msg += f"Crossover: {row['crossover']}\n"
+            alert_msg += f"ATR: {round(row['atr'], 4)} | Support: {round(row['support'], 4)} | Resistance: {round(row['resistance'], 4)}\n"
+            alert_msg += f"Sentiment: {row['sentiment_summary']}\n"
+            alert_msg += f"News: {row['news_summary']}\n"
+            alert_msg += "#forex #RSI #EMA"
 
-        try:
-            bot = telegram.Bot(token=TELEGRAM_TOKEN)
-            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg))
-        except Exception as e:
-            log_message(f"Telegram send error: {e}")
+            try:
+                bot = telegram.Bot(token=TELEGRAM_TOKEN)
+                asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg))
+            except Exception as e:
+                log_message(f"Telegram send error: {e}")
 
-        try:
-            sheet.append_row([
-                row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
-                row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
-                row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
-            ])
-        except Exception as e:
-            log_message(f"Google Sheets error: {e}")
+            try:
+                sheet.append_row([
+                    row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
+                    row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
+                    row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
+                ])
+            except Exception as e:
+                log_message(f"Google Sheets error: {e}")
+
+            try:
+                journal_sheet = client.open(GOOGLE_SHEET_NAME).worksheet("TradeJournal")
+                journal_sheet.append_row([
+                    row["timestamp"], row["pair"], row["trend_direction"], row["close"],
+                    f"RSI: {round(row['rsi'], 2)}", f"EMA10: {round(row['ema10'], 5)}",
+                    f"EMA50: {round(row['ema50'], 5)}", f"ATR: {round(row['atr'], 4)}",
+                    row["sentiment_summary"], row["news_summary"]
+                ])
+            except Exception as e:
+                log_message(f"Trade Journal update error: {e}")
+
+        send_email_alert("✅ Forex Alert Backup", "Backup complete. All systems ran successfully.")
+
+    except Exception as e:
+        log_message(f"❌ Fatal pipeline error: {e}")
+        send_email_alert("❌ Forex Alert Error", str(e))
 
 if __name__ == "__main__":
     main()
