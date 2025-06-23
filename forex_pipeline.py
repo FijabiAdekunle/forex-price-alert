@@ -4,7 +4,6 @@ import os
 import pandas as pd
 import requests
 import telegram
-import psycopg2
 import gspread
 from datetime import datetime
 from dotenv import load_dotenv
@@ -14,7 +13,7 @@ import numpy as np
 import asyncio
 import logging
 import smtplib
-from email.message import EmailMessage
+from email.mime.text import MIMEText
 
 load_dotenv()
 
@@ -24,12 +23,13 @@ PAIRS = {
     "USD/JPY": "USD/JPY"
 }
 
+# ENV variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 POSTGRES_URL = os.getenv("POSTGRES_URL")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME")
 SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_PORT = os.getenv("SMTP_PORT")
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASS = os.getenv("SMTP_PASS")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL")
@@ -41,34 +41,32 @@ def log_message(msg):
     print(f"[{datetime.utcnow()}] {msg}")
     logging.info(msg)
 
-# Email alerts for backup or error
-
-def send_email_alert(subject, body):
-    try:
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERT_EMAIL
-        msg.set_content(body)
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        logging.info("📧 Email alert sent.")
-    except Exception as e:
-        logging.error(f"Email send error: {e}")
-
 # Google Sheets Setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("gspread_key.json", scope)
 client = gspread.authorize(creds)
 sheet = client.open(GOOGLE_SHEET_NAME).sheet1
 try:
-    trade_journal = client.open(GOOGLE_SHEET_NAME).worksheet("TradeJournal")
-except Exception as e:
-    logging.error("Trade Journal update error: TradeJournal")
-    trade_journal = None
+    journal_sheet = client.open(GOOGLE_SHEET_NAME).worksheet("TradeJournal")
+except:
+    journal_sheet = None
+
+# Send Email
+def send_email(subject, body):
+    try:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = SMTP_USER
+        msg["To"] = ALERT_EMAIL
+
+        server = smtplib.SMTP(SMTP_HOST, int(SMTP_PORT))
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.sendmail(SMTP_USER, ALERT_EMAIL, msg.as_string())
+        server.quit()
+        log_message("📧 Email alert sent.")
+    except Exception as e:
+        log_message(f"Email send error: {e}")
 
 # Fetch from Twelve Data
 
@@ -103,7 +101,8 @@ def compute_indicators(df):
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
     df["atr"] = df[["high", "low", "close"]].apply(
-        lambda x: max(x[0] - x[1], abs(x[0] - x[2]), abs(x[1] - x[2])), axis=1
+        lambda x: max(x.iloc[0] - x.iloc[1], abs(x.iloc[0] - x.iloc[2]), abs(x.iloc[1] - x.iloc[2])),
+        axis=1
     ).rolling(14).mean()
     return df
 
@@ -128,7 +127,7 @@ def fetch_tradingview_sentiment(pair):
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, "html.parser")
-        tag = soup.select_one("div.js-category-header > span")
+        tag = soup.select_one("div.speedometerSignal-pyzN--tL")
         if tag:
             return tag.text.strip()
     except Exception as e:
@@ -164,8 +163,8 @@ def fetch_forex_factory_news(pair):
 
 def main():
     rows = []
-    for pair in PAIRS:
-        try:
+    try:
+        for pair in PAIRS:
             symbol = PAIRS[pair]
             df = fetch_data(symbol)
             df = compute_indicators(df)
@@ -203,46 +202,51 @@ def main():
                 "news_summary": news
             }
             rows.append(row)
-        except Exception as e:
-            log_message(f"❌ Error processing {pair}: {e}")
-            send_email_alert("Forex Pipeline Error", f"❌ Error processing {pair}: {e}")
 
-    for row in rows:
-        alert_msg = f"🚨 {row['pair']} {row['trend_direction'].upper()}\n"
-        alert_msg += f"🕒 {row['timestamp']}\n"
-        alert_msg += f"Price: {row['close']} | RSI: {round(row['rsi'], 2)}\n"
-        alert_msg += f"EMA10: {round(row['ema10'], 5)} | EMA50: {round(row['ema50'], 5)}\n"
-        alert_msg += f"Crossover: {row['crossover']}\n"
-        alert_msg += f"ATR: {round(row['atr'], 4)} | Support: {round(row['support'], 4)} | Resistance: {round(row['resistance'], 4)}\n"
-        alert_msg += f"Sentiment: {row['sentiment_summary']}\n"
-        alert_msg += f"News: {row['news_summary']}\n"
-        alert_msg += "#forex #RSI #EMA"
+        for row in rows:
+            alert_msg = f"🚨 {row['pair']} {row['trend_direction'].upper()}\n"
+            alert_msg += f"🕒 {row['timestamp']}\n"
+            alert_msg += f"Price: {row['close']} | RSI: {round(row['rsi'], 2)}\n"
+            alert_msg += f"EMA10: {round(row['ema10'], 5)} | EMA50: {round(row['ema50'], 5)}\n"
+            alert_msg += f"Crossover: {row['crossover']}\n"
+            alert_msg += f"ATR: {round(row['atr'], 4)} | Support: {round(row['support'], 4)} | Resistance: {round(row['resistance'], 4)}\n"
+            alert_msg += f"Sentiment: {row['sentiment_summary']}\n"
+            alert_msg += f"News: {row['news_summary']}\n"
+            alert_msg += "#forex #RSI #EMA"
 
-        try:
-            bot = telegram.Bot(token=TELEGRAM_TOKEN)
-            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg))
-        except Exception as e:
-            log_message(f"Telegram send error: {e}")
+            # Telegram
+            try:
+                bot = telegram.Bot(token=TELEGRAM_TOKEN)
+                asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg))
+            except Exception as e:
+                log_message(f"Telegram send error: {e}")
 
-        try:
-            sheet.append_row([
-                row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
-                row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
-                row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
-            ])
-        except Exception as e:
-            log_message(f"Google Sheets error: {e}")
-
-        try:
-            if trade_journal:
-                trade_journal.append_row([
-                    row["timestamp"], row["pair"], row["trend_direction"], row["crossover"],
-                    row["rsi"], row["atr"], row["sentiment_summary"], row["news_summary"], row["close"]
+            # Google Sheets (main)
+            try:
+                sheet.append_row([
+                    row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
+                    row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
+                    row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
                 ])
-        except Exception as e:
-            logging.error("Trade Journal update error: TradeJournal")
+            except Exception as e:
+                log_message(f"Google Sheets error: {e}")
 
-    send_email_alert("Backup complete", "All systems ran successfully.")
+            # Google Sheets (TradeJournal)
+            try:
+                if journal_sheet:
+                    journal_sheet.append_row([
+                        row["timestamp"], row["pair"], row["trend_direction"], row["crossover"],
+                        row["rsi"], row["atr"], row["support"], row["resistance"], row["sentiment_summary"], row["news_summary"]
+                    ])
+            except Exception as e:
+                log_message(f"Trade Journal update error: {e}")
+
+        send_email("Forex Backup Success", "Backup complete. All systems ran successfully.")
+
+    except Exception as err:
+        error_message = f"Forex Pipeline Failed: {err}"
+        log_message(error_message)
+        send_email("Forex Pipeline Error", error_message)
 
 if __name__ == "__main__":
     main()
