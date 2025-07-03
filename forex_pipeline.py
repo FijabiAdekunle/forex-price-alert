@@ -10,10 +10,9 @@ from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from bs4 import BeautifulSoup
 import numpy as np
+import psycopg2
 import asyncio
 import logging
-import smtplib
-from email.mime.text import MIMEText
 
 load_dotenv()
 
@@ -26,13 +25,12 @@ PAIRS = {
 # ENV variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-POSTGRES_URL = os.getenv("POSTGRES_URL")
+PG_HOST = os.getenv("PG_HOST")
+PG_PORT = os.getenv("PG_PORT")
+PG_DB = os.getenv("PG_DB")
+PG_USER = os.getenv("PG_USER")
+PG_PASSWORD = os.getenv("PG_PASSWORD")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME")
-SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = os.getenv("SMTP_PORT")
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASS = os.getenv("SMTP_PASS")
-ALERT_EMAIL = os.getenv("ALERT_EMAIL")
 
 # Logging
 logging.basicConfig(filename="log.txt", level=logging.INFO, format="[%(asctime)s] %(message)s")
@@ -46,33 +44,11 @@ scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/au
 creds = ServiceAccountCredentials.from_json_keyfile_name("gspread_key.json", scope)
 client = gspread.authorize(creds)
 sheet = client.open(GOOGLE_SHEET_NAME).sheet1
-try:
-    journal_sheet = client.open(GOOGLE_SHEET_NAME).worksheet("TradeJournal")
-except:
-    journal_sheet = None
-
-# Send Email
-def send_email(subject, body):
-    try:
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERT_EMAIL
-
-        server = smtplib.SMTP(SMTP_HOST, int(SMTP_PORT))
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(SMTP_USER, ALERT_EMAIL, msg.as_string())
-        server.quit()
-        log_message("📧 Email alert sent.")
-    except Exception as e:
-        log_message(f"Email send error: {e}")
 
 # Fetch from Twelve Data
-
 def fetch_data(symbol):
     api_key = os.getenv("TWELVE_DATA_API_KEY")
-    url = f"https://api.twelvedata.com/time_series"
+    url = "https://api.twelvedata.com/time_series"
     params = {
         "symbol": symbol,
         "interval": "15min",
@@ -90,30 +66,24 @@ def fetch_data(symbol):
     df = df.astype(float)
     return df
 
-# Compute indicators
-
 def compute_indicators(df):
     df["ema10"] = df["close"].ewm(span=10).mean()
     df["ema50"] = df["close"].ewm(span=50).mean()
     delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(14).mean()
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
     df["atr"] = df[["high", "low", "close"]].apply(
-        lambda x: max(x.iloc[0] - x.iloc[1], abs(x.iloc[0] - x.iloc[2]), abs(x.iloc[1] - x.iloc[2])),
+        lambda x: max(x[0] - x[1], abs(x[0] - x[2]), abs(x[1] - x[2])),
         axis=1
     ).rolling(14).mean()
     return df
-
-# Support/Resistance
 
 def detect_levels(df):
     support = df["low"].rolling(10).min().iloc[-1]
     resistance = df["high"].rolling(10).max().iloc[-1]
     return support, resistance
-
-# TradingView sentiment
 
 def fetch_tradingview_sentiment(pair):
     try:
@@ -133,8 +103,6 @@ def fetch_tradingview_sentiment(pair):
     except Exception as e:
         log_message(f"TradingView sentiment error for {pair}: {e}")
     return "N/A"
-
-# Forex Factory news
 
 def fetch_forex_factory_news(pair):
     try:
@@ -159,94 +127,86 @@ def fetch_forex_factory_news(pair):
         log_message(f"ForexFactory news error for {pair}: {e}")
     return "No news"
 
-# Main pipeline
-
-def main():
-    rows = []
+# PostgreSQL push
+def push_to_postgres(row):
     try:
-        for pair in PAIRS:
-            symbol = PAIRS[pair]
-            df = fetch_data(symbol)
-            df = compute_indicators(df)
-            support, resistance = detect_levels(df)
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DB,
+            user=PG_USER,
+            password=PG_PASSWORD
+        )
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO forex_history (
+                timestamp, pair, open, high, low, close,
+                ema10, ema50, rsi, atr, support, resistance,
+                trend, crossover, sentiment, news
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
+            row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
+            row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        log_message(f"📦 PostgreSQL saved: {row['pair']}")
+    except Exception as e:
+        log_message(f"PostgreSQL error: {e}")
 
-            prev = df.iloc[-2]
-            latest = df.iloc[-1]
-            if prev["ema10"] < prev["ema50"] and latest["ema10"] > latest["ema50"]:
-                crossover = "Bullish Crossover"
-            elif prev["ema10"] > prev["ema50"] and latest["ema10"] < latest["ema50"]:
-                crossover = "Bearish Crossover"
-            else:
-                crossover = "No Crossover"
+# Main
+def main():
+    for pair in PAIRS:
+        df = fetch_data(pair)
+        df = compute_indicators(df)
+        support, resistance = detect_levels(df)
+        prev = df.iloc[-2]
+        latest = df.iloc[-1]
 
-            trend = "Uptrend" if latest["ema10"] > latest["ema50"] else "Downtrend"
-            sentiment = fetch_tradingview_sentiment(pair)
-            news = fetch_forex_factory_news(pair)
+        if prev["ema10"] < prev["ema50"] and latest["ema10"] > latest["ema50"]:
+            crossover = "Bullish Crossover"
+        elif prev["ema10"] > prev["ema50"] and latest["ema10"] < latest["ema50"]:
+            crossover = "Bearish Crossover"
+        else:
+            crossover = "No Crossover"
 
-            row = {
-                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                "pair": pair,
-                "open": latest["open"],
-                "high": latest["high"],
-                "low": latest["low"],
-                "close": latest["close"],
-                "ema10": latest["ema10"],
-                "ema50": latest["ema50"],
-                "rsi": latest["rsi"],
-                "atr": latest["atr"],
-                "support": support,
-                "resistance": resistance,
-                "trend_direction": trend,
-                "crossover": crossover,
-                "sentiment_summary": sentiment,
-                "news_summary": news
-            }
-            rows.append(row)
+        row = {
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "pair": pair,
+            "open": latest["open"], "high": latest["high"],
+            "low": latest["low"], "close": latest["close"],
+            "ema10": latest["ema10"], "ema50": latest["ema50"], "rsi": latest["rsi"],
+            "atr": latest["atr"], "support": support, "resistance": resistance,
+            "trend_direction": "Uptrend" if latest["ema10"] > latest["ema50"] else "Downtrend",
+            "crossover": crossover,
+            "sentiment_summary": fetch_tradingview_sentiment(pair),
+            "news_summary": fetch_forex_factory_news(pair)
+        }
 
-        for row in rows:
-            alert_msg = f"🚨 {row['pair']} {row['trend_direction'].upper()}\n"
-            alert_msg += f"🕒 {row['timestamp']}\n"
-            alert_msg += f"Price: {row['close']} | RSI: {round(row['rsi'], 2)}\n"
-            alert_msg += f"EMA10: {round(row['ema10'], 5)} | EMA50: {round(row['ema50'], 5)}\n"
-            alert_msg += f"Crossover: {row['crossover']}\n"
-            alert_msg += f"ATR: {round(row['atr'], 4)} | Support: {round(row['support'], 4)} | Resistance: {round(row['resistance'], 4)}\n"
-            alert_msg += f"Sentiment: {row['sentiment_summary']}\n"
-            alert_msg += f"News: {row['news_summary']}\n"
-            alert_msg += "#forex #RSI #EMA"
+        # Telegram alert
+        try:
+            alert_msg = f"🚨 {row['pair']} {row['trend_direction']}\n🕒 {row['timestamp']}\n" \
+                        f"Price: {row['close']} | RSI: {round(row['rsi'], 2)}\n" \
+                        f"EMA10: {round(row['ema10'], 5)} | EMA50: {round(row['ema50'], 5)}\n" \
+                        f"{row['crossover']} | ATR: {round(row['atr'], 4)}\n" \
+                        f"Support: {round(row['support'], 4)} | Resistance: {round(row['resistance'], 4)}\n" \
+                        f"Sentiment: {row['sentiment_summary']} | News: {row['news_summary']}"
+            bot = telegram.Bot(token=TELEGRAM_TOKEN)
+            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg))
+        except Exception as e:
+            log_message(f"Telegram send error: {e}")
 
-            # Telegram
-            try:
-                bot = telegram.Bot(token=TELEGRAM_TOKEN)
-                asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=alert_msg))
-            except Exception as e:
-                log_message(f"Telegram send error: {e}")
+        # Google Sheets
+        try:
+            sheet.append_row(list(row.values()))
+        except Exception as e:
+            log_message(f"Google Sheets error: {e}")
 
-            # Google Sheets (main)
-            try:
-                sheet.append_row([
-                    row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
-                    row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
-                    row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
-                ])
-            except Exception as e:
-                log_message(f"Google Sheets error: {e}")
-
-            # Google Sheets (TradeJournal)
-            try:
-                if journal_sheet:
-                    journal_sheet.append_row([
-                        row["timestamp"], row["pair"], row["trend_direction"], row["crossover"],
-                        row["rsi"], row["atr"], row["support"], row["resistance"], row["sentiment_summary"], row["news_summary"]
-                    ])
-            except Exception as e:
-                log_message(f"Trade Journal update error: {e}")
-
-        send_email("Forex Backup Success", "Backup complete. All systems ran successfully.")
-
-    except Exception as err:
-        error_message = f"Forex Pipeline Failed: {err}"
-        log_message(error_message)
-        send_email("Forex Pipeline Error", error_message)
+        # PostgreSQL
+        push_to_postgres(row)
 
 if __name__ == "__main__":
     main()
