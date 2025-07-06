@@ -35,7 +35,7 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
-            pip install requests-html pandas-t 
+           
 
       - name: Run pipeline
         run: python forex_pipeline.py
