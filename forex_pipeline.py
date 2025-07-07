@@ -184,4 +184,118 @@ def save_to_supabase(row):
                 trend_direction, crossover, sentiment_summary, news_summary
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-           
+            row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
+            row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
+            row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
+        ))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Supabase save failed: {str(e)}")
+        return False
+
+def append_to_sheet(row):
+    """Append data to Google Sheet"""
+    if not sheet:
+        logger.error("Google Sheets not initialized")
+        return False
+    try:
+        sheet.append_row([
+            row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
+            row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
+            row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
+        ])
+        return True
+    except Exception as e:
+        logger.error(f"Google Sheets append failed: {str(e)}")
+        return False
+
+def generate_alert_message(row):
+    """Generate formatted alert message"""
+    return f"""
+🚨 {row['pair']} {row['trend_direction']}
+🕒 {row['timestamp']}
+💰 Price: {row['close']:.5f} | RSI: {row['rsi']:.2f}
+📊 EMA10: {row['ema10']:.5f} | EMA50: {row['ema50']:.5f}
+🔀 {row['crossover']} | ATR: {row['atr']:.5f}
+🔽 Support: {row['support']:.5f} | 🔼 Resistance: {row['resistance']:.5f}
+📢 Sentiment: {row['sentiment_summary']}
+🗞️ News: {row['news_summary']}
+"""
+
+def main():
+    logger.info("Starting forex pipeline")
+    alerts = []
+    
+    for pair_name, pair_symbol in PAIRS.items():
+        try:
+            logger.info(f"Processing {pair_name}")
+            
+            # Fetch and process data
+            df = fetch_data(pair_symbol)
+            if df is None:
+                continue
+                
+            df = compute_indicators(df)
+            if df is None:
+                continue
+                
+            # Get current and previous values
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+            
+            # Calculate levels and trends
+            support, resistance = detect_levels(df)
+            crossover = get_crossover_status(prev["ema10"], prev["ema50"], latest["ema10"], latest["ema50"])
+            trend = "Uptrend" if latest["ema10"] > latest["ema50"] else "Downtrend"
+            
+            # Prepare alert data
+            alert_data = {
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "pair": pair_name,
+                "open": latest["open"],
+                "high": latest["high"],
+                "low": latest["low"],
+                "close": latest["close"],
+                "ema10": latest["ema10"],
+                "ema50": latest["ema50"],
+                "rsi": latest["rsi"],
+                "atr": latest["atr"],
+                "support": support,
+                "resistance": resistance,
+                "trend_direction": trend,
+                "crossover": crossover,
+                "sentiment_summary": fetch_sentiment(pair_name),
+                "news_summary": fetch_news(pair_name)
+            }
+            
+            alerts.append(alert_data)
+            
+        except Exception as e:
+            logger.error(f"Failed to process {pair_name}: {str(e)}")
+            continue
+    
+    # Send alerts and save data
+    for alert in alerts:
+        try:
+            message = generate_alert_message(alert)
+            
+            # Send Telegram alert
+            if not asyncio.run(send_telegram_alert(message)):
+                logger.error(f"Failed to send Telegram alert for {alert['pair']}")
+            
+            # Save to Google Sheets
+            if not append_to_sheet(alert):
+                logger.error(f"Failed to update Google Sheets for {alert['pair']}")
+            
+            # Save to Supabase
+            if not save_to_supabase(alert):
+                logger.error(f"Failed to update Supabase for {alert['pair']}")
+                
+        except Exception as e:
+            logger.error(f"Failed to process output for {alert['pair']}: {str(e)}")
+    
+    logger.info("Forex pipeline completed")
+
+if __name__ == "__main__":
+    main()
