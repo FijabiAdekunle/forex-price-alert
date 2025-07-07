@@ -8,6 +8,3 @@ asyncio
 beautifulsoup4
 numpy
 psycopg2-binary
-requests-html>=0.10.0
-pandas-ta>=0.3.14
-
