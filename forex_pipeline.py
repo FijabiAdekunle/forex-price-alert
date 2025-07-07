@@ -5,7 +5,7 @@ import requests
 import telegram
 import gspread
 import psycopg2
-from datetime import datetime, time, timedelta
+from datetime import datetime, time as dt_time, timedelta
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from bs4 import BeautifulSoup
@@ -29,10 +29,10 @@ PAIRS = {
 }
 
 MARKET_SESSIONS = {
-    "Asian": (time(0,0), time(6,59)),
-    "London": (time(7,0), time(15,59)), 
-    "NY": (time(13,0), time(20,59)),
-    "Closed": (time(21,0), time(23,59))
+    "Asian": (dt_time(0,0), dt_time(6,59)),
+    "London": (dt_time(7,0), dt_time(15,59)), 
+    "NY": (dt_time(13,0), dt_time(20,59)),
+    "Closed": (dt_time(21,0), dt_time(23,59))
 }
 
 REQUEST_HEADERS = {
