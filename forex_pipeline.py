@@ -217,4 +217,103 @@ def generate_alert(row: Dict) -> str:
     
     alert_msg = (
         f"\n🌐 *Market Session:* {session}\n"
-        f"🚨 *{row['pair']} {
+        f"🚨 *{row['pair']} {row['trend_direction']}*\n"
+        f"🕒 {row['timestamp']}\n"
+        f"💰 *Price:* {row['close']:.5f} | *RSI:* {row['rsi']:.2f}\n"
+        f"📊 *EMAs:* {row['ema10']:.5f} (10) | {row['ema50']:.5f} (50)\n"
+        f"🔀 *Crossover:* {row['crossover']} ({ema_diff:.2f}% diff)\n"
+        f"📈 *Volatility:* ATR {row['atr']:.5f} | Range {row['low']:.5f}-{row['high']:.5f}\n"
+        f"🔽 *Support:* {row['support']:.5f} | 🔼 *Resistance:* {row['resistance']:.5f}\n"
+        f"📢 *Sentiment:* {row['sentiment_summary']}\n"
+        f"🗞️ *News:* {row['news_summary']}\n"
+    )
+    
+    # Add warnings if needed
+    if row["rsi"] > 70 and "Bullish" in row["crossover"]:
+        alert_msg += "\n⚠️ *Warning:* Overbought with Bullish Crossover\n"
+    elif row["rsi"] < 30 and "Bearish" in row["crossover"]:
+        alert_msg += "\n⚠️ *Warning:* Oversold with Bearish Crossover\n"
+    
+    return alert_msg
+
+async def send_telegram_alert(message: str) -> bool:
+    """Send alert to Telegram"""
+    try:
+        bot = telegram.Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
+        await bot.send_message(
+            chat_id=os.getenv("TELEGRAM_CHAT_ID"),
+            text=message,
+            parse_mode="Markdown"
+        )
+        return True
+    except Exception as e:
+        logging.error(f"Telegram send failed: {str(e)}")
+        return False
+
+# ======================
+# MAIN PIPELINE
+# ======================
+def main():
+    """Main execution flow"""
+    logging.info("Starting Forex Pipeline")
+    rows = []
+    
+    for pair in PAIRS:
+        try:
+            # Data Processing
+            df = compute_indicators(fetch_data(PAIRS[pair]))
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+            
+            # Technical Analysis
+            support, resistance = detect_levels(df)
+            ema_diff = (latest["ema10"] - latest["ema50"]) / latest["ema50"] * 100
+            crossover = "Bullish Crossover" if (prev["ema10"] < prev["ema50"] and latest["ema10"] > latest["ema50"]) else \
+                       "Bearish Crossover" if (prev["ema10"] > prev["ema50"] and latest["ema10"] < latest["ema50"]) else \
+                       "No Crossover"
+            
+            # Sentiment & News
+            sentiment = fetch_tradingview_sentiment(pair)
+            news = fetch_forex_factory_news(pair)
+            
+            # Prepare alert data
+            rows.append({
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "pair": pair,
+                "open": latest["open"],
+                "high": latest["high"],
+                "low": latest["low"],
+                "close": latest["close"],
+                "ema10": latest["ema10"],
+                "ema50": latest["ema50"],
+                "rsi": latest["rsi"],
+                "atr": latest["atr"],
+                "support": support,
+                "resistance": resistance,
+                "trend_direction": "Uptrend" if latest["ema10"] > latest["ema50"] else "Downtrend",
+                "crossover": crossover,
+                "sentiment_summary": sentiment,
+                "news_summary": news
+            })
+            
+        except Exception as e:
+            logging.error(f"Failed processing {pair}: {str(e)}")
+            continue
+    
+    # Send alerts and save data
+    for row in rows:
+        try:
+            # Telegram Alert
+            asyncio.run(send_telegram_alert(generate_alert(row)))
+            
+            # Google Sheets
+            sheet.append_row(list(row.values()))
+            
+            # Database (optional)
+            # save_to_database(row)
+            
+        except Exception as e:
+            logging.error(f"Failed alert processing for {row['pair']}: {str(e)}")
+
+if __name__ == "__main__":
+    main()
