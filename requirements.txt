@@ -9,10 +9,6 @@ beautifulsoup4==4.13.4
 numpy==1.24.4
 psycopg2-binary==2.9.10
 
-# HTML Processing
-lxml==4.9.4
-lxml-html-clean==0.1.1
+# Optional (only if needed)
 requests-html==0.10.0
-
-# Technical Analysis
 pandas-ta==0.3.14b0
