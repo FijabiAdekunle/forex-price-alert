@@ -12,9 +12,7 @@ from bs4 import BeautifulSoup
 import numpy as np
 import asyncio
 import logging
-import time
 from typing import Dict, Tuple, Optional, List
-from requests_html import HTMLSession  # For JS-rendered sites
 
 # Load environment variables
 load_dotenv()
@@ -44,7 +42,7 @@ REQUEST_HEADERS = {
 # INITIALIZATION
 # ======================
 logging.basicConfig(
-    filename="forex_enhanced.log",
+    filename="forex_pipeline.log",
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
@@ -75,6 +73,16 @@ def get_market_session() -> str:
             return f"{session} Session"
     return "After Hours"
 
+def fetch_webpage(url: str) -> Optional[str]:
+    """Robust webpage fetcher with error handling"""
+    try:
+        response = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        logging.error(f"Webpage fetch failed for {url}: {str(e)}")
+        return None
+
 def enhanced_sentiment(pair: str, rsi: float, ema_diff: float) -> str:
     """Multi-factor sentiment analysis"""
     factors = []
@@ -84,8 +92,6 @@ def enhanced_sentiment(pair: str, rsi: float, ema_diff: float) -> str:
         factors.append("Overbought (RSI {:.1f})".format(rsi))
     elif rsi < 30:
         factors.append("Oversold (RSI {:.1f})".format(rsi))
-    elif 45 < rsi < 55:
-        factors.append("Neutral RSI")
     
     # EMA Analysis
     if ema_diff > 0.2:
@@ -97,195 +103,118 @@ def enhanced_sentiment(pair: str, rsi: float, ema_diff: float) -> str:
     elif ema_diff < -0.05:
         factors.append("Mild Bearish EMA")
     
-    # Price Action (would need historical data)
-    
-    # Generate summary
-    if not factors:
-        return "Neutral (No clear signals)"
-    
-    # Special cases
-    if "Overbought" in factors and "Bullish" in factors:
-        return "Caution: Bullish but Overbought"
-    if "Oversold" in factors and "Bearish" in factors:
-        return "Caution: Bearish but Oversold"
-        
-    return " | ".join(factors)
+    return " | ".join(factors) if factors else "Neutral (Technical Indicators)"
 
 # ======================
-# NEWS IMPROVEMENTS
+# DATA FETCHING & PROCESSING
 # ======================
-def fetch_multi_source_news(pair: str) -> str:
-    """Aggregate news from multiple sources"""
-    news_sources = [
-        fetch_forex_factory_news,
-        fetch_fxstreet_news,
-        fetch_investing_com_news
-    ]
-    
-    collected_news = []
-    for source in news_sources:
-        try:
-            news = source(pair)
-            if news and "unavailable" not in news.lower():
-                collected_news.append(news)
-                if len(collected_news) >= 2:  # Limit to 2 sources
-                    break
-        except Exception as e:
-            logging.warning(f"News source failed: {str(e)}")
-            continue
-    
-    return format_news_output(collected_news)
-
-def fetch_fxstreet_news(pair: str) -> str:
-    """Fetch news from FXStreet"""
-    try:
-        session = HTMLSession()
-        url = "https://www.fxstreet.com/economic-calendar"
-        r = session.get(url, headers=REQUEST_HEADERS, timeout=15)
-        
-        # Wait for JS execution
-        r.html.render(timeout=20)
-        
-        # Extract relevant news
-        events = r.html.find(".ec-event-item", first=False)
-        today = datetime.utcnow().strftime("%b %-d")
-        currency_codes = {
-            "EUR/USD": ["EUR", "USD"],
-            "GBP/USD": ["GBP", "USD"],
-            "USD/JPY": ["USD", "JPY"]
-        }
-        
-        relevant_events = []
-        for event in events[:5]:  # Check top 5 events
-            if today not in event.text:
-                continue
-            if any(currency in event.text for currency in currency_codes[pair]):
-                time_element = event.find(".ec-tz", first=True)
-                title_element = event.find(".ec-title", first=True)
-                if time_element and title_element:
-                    relevant_events.append(
-                        f"{time_element.text.strip()} {title_element.text.strip()}"
-                    )
-        
-        return "FXStreet: " + " | ".join(relevant_events[:2]) if relevant_events else ""
-    
-    except Exception as e:
-        logging.warning(f"FXStreet news error: {str(e)}")
-        return ""
-
-def fetch_investing_com_news(pair: str) -> str:
-    """Fetch news from Investing.com"""
-    try:
-        symbol_map = {
-            "EUR/USD": "eur-usd",
-            "GBP/USD": "gbp-usd",
-            "USD/JPY": "usd-jpy"
-        }
-        url = f"https://www.investing.com/currencies/{symbol_map[pair]}-news"
-        
-        response = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        articles = soup.select("article.articleItem")[:3]
-        news_items = []
-        
-        for article in articles:
-            time_tag = article.find("span", class_="date")
-            title_tag = article.find("a", class_="title")
-            if time_tag and title_tag:
-                news_items.append(
-                    f"{time_tag.text.strip()}: {title_tag.text.strip()}"
-                )
-        
-        return "Investing.com: " + " | ".join(news_items) if news_items else ""
-    
-    except Exception as e:
-        logging.warning(f"Investing.com news error: {str(e)}")
-        return ""
-
-def format_news_output(news_items: List[str]) -> str:
-    """Format news from multiple sources"""
-    if not news_items:
-        current_session = get_market_session()
-        if "Overlap" in current_session or "London" in current_session:
-            return "No high-impact news (Check unexpected events)"
-        return "No scheduled high-impact news"
-    
-    # Remove duplicate news
-    unique_news = []
-    seen = set()
-    for item in news_items:
-        key = item.split(":", 1)[-1].strip()[:50]  # First 50 chars as key
-        if key not in seen:
-            seen.add(key)
-            unique_news.append(item)
-    
-    return " | ".join(unique_news[:2])  # Max 2 news items
-
-# ======================
-# ENHANCED ALERT GENERATION
-# ======================
-def generate_enhanced_alert(row: Dict) -> str:
-    """Generate alert with market context"""
-    session_status = get_market_session()
-    ema_diff_pct = ((row["ema10"] - row["ema50"]) / row["ema50"]) * 100
-    
-    alert_msg = (
-        f"\n🌐 *Market Status:* {session_status}\n"
-        f"🚨 *{row['pair']} {row['trend_direction']}*\n"
-        f"🕒 {row['timestamp']}\n"
-        f"💰 *Price:* {row['close']:.5f} | *RSI:* {row['rsi']:.2f}\n"
-        f"📊 *EMAs:* {row['ema10']:.5f} (10) | {row['ema50']:.5f} (50)\n"
-        f"🔀 *Crossover:* {row['crossover']} ({ema_diff_pct:.2f}% diff)\n"
-        f"📈 *Volatility:* ATR {row['atr']:.5f} | Range {row['low']:.5f}-{row['high']:.5f}\n"
-        f"🔽 *Support:* {row['support']:.5f} | 🔼 *Resistance:* {row['resistance']:.5f}\n"
-        f"📢 *Sentiment:* {row['sentiment_summary']}\n"
-        f"🗞️ *News:* {row['news_summary']}\n"
-    )
-    
-    # Add special warnings
-    if row["rsi"] > 70 and "Bullish" in row["crossover"]:
-        alert_msg += "\n⚠️ *Warning:* Overbought with Bullish Crossover - Potential Reversal Risk\n"
-    elif row["rsi"] < 30 and "Bearish" in row["crossover"]:
-        alert_msg += "\n⚠️ *Warning:* Oversold with Bearish Crossover - Potential Reversal Risk\n"
-    
-    return alert_msg
-
-# ======================
-# MAIN EXECUTION
-# ======================
-def main():
-    """Enhanced main pipeline"""
-    logging.info("🚀 Starting Enhanced Forex Pipeline")
+def fetch_data(symbol: str) -> pd.DataFrame:
+    """Fetch forex data from Twelve Data API"""
+    api_key = os.getenv("TWELVE_DATA_API_KEY")
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": "15min",
+        "outputsize": 100,
+        "apikey": api_key
+    }
     
     try:
-        for pair in PAIRS:
-            try:
-                # [Previous data fetching and processing...]
-                
-                # Enhanced sentiment analysis
-                ema_diff = (latest["ema10"] - latest["ema50"]) / latest["ema50"] * 100
-                sentiment = enhanced_sentiment(pair, latest["rsi"], ema_diff)
-                
-                # Multi-source news
-                news = fetch_multi_source_news(pair)
-                
-                # Generate enhanced alert
-                row = {
-                    # [Previous data fields...],
-                    "sentiment_summary": sentiment,
-                    "news_summary": news
-                }
-                
-                alert = generate_enhanced_alert(row)
-                asyncio.run(send_telegram_alert(alert))
-                
-            except Exception as e:
-                logging.error(f"Pair {pair} processing failed: {str(e)}")
-                
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        return df.sort_values("datetime").set_index("datetime")
     except Exception as e:
-        logging.critical(f"Pipeline failed: {str(e)}")
+        logging.error(f"Data fetch failed for {symbol}: {str(e)}")
         raise
 
-if __name__ == "__main__":
-    main()
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate technical indicators"""
+    try:
+        # EMAs
+        df["ema10"] = df["close"].ewm(span=10, adjust=False).mean()
+        df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+        
+        # RSI
+        delta = df["close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df["rsi"] = 100 - (100 / (1 + rs))
+        
+        # ATR
+        high_low = df["high"] - df["low"]
+        high_close = (df["high"] - df["close"].shift()).abs()
+        low_close = (df["low"] - df["close"].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df["atr"] = true_range.rolling(window=14).mean()
+        
+        return df
+    except Exception as e:
+        logging.error(f"Indicator calculation failed: {str(e)}")
+        raise
+
+# ======================
+# NEWS & SENTIMENT
+# ======================
+def fetch_tradingview_sentiment(pair: str) -> str:
+    """Fetch market sentiment from TradingView"""
+    try:
+        symbol_map = {
+            "EUR/USD": "EURUSD",
+            "GBP/USD": "GBPUSD",
+            "USD/JPY": "USDJPY"
+        }
+        url = f"https://www.tradingview.com/symbols/{symbol_map[pair]}/technicals/"
+        html = fetch_webpage(url)
+        if not html:
+            return "Sentiment unavailable"
+            
+        soup = BeautifulSoup(html, 'html.parser')
+        sentiment_tag = soup.find("div", class_="speedometerWrapper-")
+        if sentiment_tag:
+            return sentiment_tag.get_text(strip=True)
+        return "Neutral (No clear signal)"
+    except Exception as e:
+        logging.error(f"Sentiment fetch failed: {str(e)}")
+        return "Sentiment unavailable"
+
+def fetch_forex_factory_news(pair: str) -> str:
+    """Fetch news from Forex Factory"""
+    try:
+        if datetime.utcnow().weekday() >= 5:
+            return "Weekend: No scheduled news"
+            
+        url = "https://www.forexfactory.com/calendar?day=today"
+        html = fetch_webpage(url)
+        if not html:
+            return "News unavailable"
+            
+        soup = BeautifulSoup(html, 'html.parser')
+        events = soup.find_all("tr", class_="calendar__row")
+        news_items = []
+        
+        for event in events[:5]:  # Check first 5 events
+            if "high" in event.get("class", []):
+                time_tag = event.find("td", class_="calendar__time")
+                title_tag = event.find("td", class_="calendar__event")
+                if time_tag and title_tag:
+                    news_items.append(f"{time_tag.text.strip()}: {title_tag.text.strip()}")
+        
+        return " | ".join(news_items[:2]) if news_items else "No high-impact news"
+    except Exception as e:
+        logging.error(f"News fetch failed: {str(e)}")
+        return "News unavailable"
+
+# ======================
+# ALERT GENERATION
+# ======================
+def generate_alert(row: Dict) -> str:
+    """Generate formatted alert message"""
+    ema_diff = ((row["ema10"] - row["ema50"]) / row["ema50"]) * 100
+    session = get_market_session()
+    
+    alert_msg = (
+        f"\n🌐 *Market Session:* {session}\n"
+        f"🚨 *{row['pair']} {
