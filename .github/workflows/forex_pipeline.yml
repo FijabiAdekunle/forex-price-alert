@@ -2,11 +2,10 @@ name: Run Forex Pipeline
 
 on:
   schedule:
-    - cron: '0 9 * * *'   # 09:00 UTC
-    - cron: '0 12 * * *'  # 12:00 UTC
-    - cron: '0 14 * * *'  # 14:00 UTC
-    - cron: '0 18 * * *'  # 18:00 UTC
-
+    - cron: '0 9 * * *'
+    - cron: '0 12 * * *'
+    - cron: '0 14 * * *'
+    - cron: '0 18 * * *'
   workflow_dispatch:
 
 jobs:
@@ -22,7 +21,7 @@ jobs:
       PG_PASSWORD: ${{ secrets.PG_PASSWORD }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      GSPREAD_KEY_JSON: ${{ secrets.GSPREAD_KEY_JSON }}
+      GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
 
     steps:
       - name: Checkout repo
@@ -35,7 +34,6 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
-            pip install requests-html pandas-t 
 
       - name: Run pipeline
         run: python forex_pipeline.py
