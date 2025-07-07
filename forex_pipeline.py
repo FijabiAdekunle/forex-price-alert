@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import pandas as pd
 import requests
@@ -13,76 +14,167 @@ import asyncio
 import logging
 import traceback
 
-# Enhanced logging configuration
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('forex_pipeline_debug.log'),
+        logging.FileHandler('forex_pipeline.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables with verification
+# Load environment variables
 load_dotenv()
 
-def verify_env_vars():
-    """Verify all required environment variables are set"""
-    required_vars = [
-        'TWELVE_DATA_API_KEY',
-        'TELEGRAM_BOT_TOKEN',
-        'TELEGRAM_CHAT_ID',
-        'GSPREAD_KEY_JSON',
-        'GOOGLE_SHEET_NAME',
-        'POSTGRES_URL'
-    ]
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    if missing_vars:
-        logger.error(f"Missing environment variables: {', '.join(missing_vars)}")
-        raise EnvironmentError(f"Missing required environment variables: {missing_vars}")
+# Configuration
+PAIRS = {
+    "EUR/USD": "EUR/USD",
+    "GBP/USD": "GBP/USD",
+    "USD/JPY": "USD/JPY"
+}
 
-verify_env_vars()
-
-# Initialize services with error handling
+# Initialize services
 try:
+    # Google Sheets
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name("gspread_key.json", scope)
     gs_client = gspread.authorize(creds)
     sheet = gs_client.open(os.getenv("GOOGLE_SHEET_NAME")).sheet1
-    logger.info("Successfully connected to Google Sheets")
+    logger.info("Google Sheets initialized")
 except Exception as e:
-    logger.error(f"Google Sheets initialization failed: {str(e)}")
+    logger.error(f"Google Sheets init failed: {str(e)}")
     sheet = None
 
 try:
+    # Telegram
+    bot = telegram.Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
+    logger.info("Telegram bot initialized")
+except Exception as e:
+    logger.error(f"Telegram init failed: {str(e)}")
+    bot = None
+
+try:
+    # Supabase
     conn = psycopg2.connect(os.getenv("POSTGRES_URL"))
-    logger.info("Successfully connected to Supabase")
+    logger.info("Supabase connected")
 except Exception as e:
     logger.error(f"Supabase connection failed: {str(e)}")
     conn = None
 
-# Telegram bot initialization
-bot = telegram.Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
+def fetch_data(symbol):
+    """Fetch market data from Twelve Data API"""
+    try:
+        url = "https://api.twelvedata.com/time_series"
+        params = {
+            "symbol": symbol,
+            "interval": "15min",
+            "outputsize": 50,
+            "apikey": os.getenv("TWELVE_DATA_API_KEY")
+        }
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        return df.sort_values("datetime").set_index("datetime")
+    except Exception as e:
+        logger.error(f"Data fetch failed for {symbol}: {str(e)}")
+        return None
 
-async def send_telegram_alert(message: str):
-    """Send alert with comprehensive error handling"""
+def compute_indicators(df):
+    """Calculate technical indicators"""
+    try:
+        # EMAs
+        df["ema10"] = df["close"].ewm(span=10, adjust=False).mean()
+        df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+        
+        # RSI
+        delta = df["close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df["rsi"] = 100 - (100 / (1 + rs))
+        
+        # ATR
+        high_low = df["high"] - df["low"]
+        high_close = (df["high"] - df["close"].shift()).abs()
+        low_close = (df["low"] - df["close"].shift()).abs()
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df["atr"] = true_range.rolling(window=14).mean()
+        
+        return df
+    except Exception as e:
+        logger.error(f"Indicator calculation failed: {str(e)}")
+        return None
+
+def detect_levels(df):
+    """Calculate support and resistance"""
+    try:
+        support = df["low"].rolling(10).min().iloc[-1]
+        resistance = df["high"].rolling(10).max().iloc[-1]
+        return round(support, 5), round(resistance, 5)
+    except Exception as e:
+        logger.error(f"Level detection failed: {str(e)}")
+        return 0.0, 0.0
+
+def get_crossover_status(prev_ema10, prev_ema50, curr_ema10, curr_ema50):
+    """Determine EMA crossover status"""
+    try:
+        if prev_ema10 < prev_ema50 and curr_ema10 > curr_ema50:
+            return "Bullish Crossover"
+        elif prev_ema10 > prev_ema50 and curr_ema10 < curr_ema50:
+            return "Bearish Crossover"
+        elif curr_ema10 > curr_ema50:
+            diff = ((curr_ema10 - curr_ema50) / curr_ema50) * 100
+            return f"EMA10 > EMA50 by {diff:.2f}% (Bullish)"
+        else:
+            diff = ((curr_ema50 - curr_ema10) / curr_ema10) * 100
+            return f"EMA10 < EMA50 by {diff:.2f}% (Bearish)"
+    except Exception as e:
+        logger.error(f"Crossover detection failed: {str(e)}")
+        return "Crossover Unknown"
+
+def fetch_sentiment(pair):
+    """Fetch market sentiment"""
+    try:
+        # Implement your sentiment analysis here
+        return "Neutral (No clear signal)"
+    except Exception as e:
+        logger.error(f"Sentiment fetch failed: {str(e)}")
+        return "Sentiment Unavailable"
+
+def fetch_news(pair):
+    """Fetch relevant news"""
+    try:
+        if datetime.utcnow().weekday() >= 5:
+            return "Weekend: No scheduled news"
+        return "No major news"
+    except Exception as e:
+        logger.error(f"News fetch failed: {str(e)}")
+        return "News Unavailable"
+
+async def send_telegram_alert(message):
+    """Send alert to Telegram"""
+    if not bot:
+        logger.error("Telegram bot not initialized")
+        return False
     try:
         await bot.send_message(
             chat_id=os.getenv("TELEGRAM_CHAT_ID"),
             text=message,
             parse_mode="Markdown"
         )
-        logger.info(f"Telegram alert sent for {message.split()[1]}")  # Log pair name
+        return True
     except Exception as e:
-        logger.error(f"Telegram send failed: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"Telegram send failed: {str(e)}")
+        return False
 
-def save_to_supabase(row: dict):
-    """Save data to Supabase with error handling"""
+def save_to_supabase(row):
+    """Save data to Supabase"""
     if not conn:
-        logger.warning("Skipping Supabase update - no connection")
-        return
-        
+        logger.error("Supabase connection not available")
+        return False
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -92,80 +184,4 @@ def save_to_supabase(row: dict):
                 trend_direction, crossover, sentiment_summary, news_summary
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
-            row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
-            row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
-        ))
-        conn.commit()
-        logger.info(f"Supabase updated for {row['pair']}")
-    except Exception as e:
-        logger.error(f"Supabase update failed for {row['pair']}: {str(e)}\n{traceback.format_exc()}")
-
-def append_to_sheet(row: dict):
-    """Append data to Google Sheet with error handling"""
-    if not sheet:
-        logger.warning("Skipping Google Sheets update - no connection")
-        return
-        
-    try:
-        sheet.append_row([
-            row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
-            row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
-            row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
-        ])
-        logger.info(f"Google Sheet updated for {row['pair']}")
-    except Exception as e:
-        logger.error(f"Google Sheets update failed for {row['pair']}: {str(e)}\n{traceback.format_exc()}")
-
-def main():
-    logger.info("Starting Forex Pipeline Execution")
-    
-    try:
-        # Your existing data processing logic here
-        # For each pair, create a row dictionary with all the required fields
-        
-        # Example row - replace with your actual data processing
-        example_row = {
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            "pair": "EUR/USD",
-            "open": 1.0800,
-            "high": 1.0820,
-            "low": 1.0790,
-            "close": 1.0815,
-            "ema10": 1.0805,
-            "ema50": 1.0795,
-            "rsi": 60.5,
-            "atr": 0.0025,
-            "support": 1.0780,
-            "resistance": 1.0830,
-            "trend_direction": "Uptrend",
-            "crossover": "Bullish Crossover",
-            "sentiment_summary": "Bullish",
-            "news_summary": "ECB rate decision upcoming"
-        }
-        
-        # Generate alert message
-        alert_message = f"""
-🚨 {example_row['pair']} {example_row['trend_direction']}
-Price: {example_row['close']} | RSI: {example_row['rsi']}
-EMA10: {example_row['ema10']} | EMA50: {example_row['ema50']}
-Crossover: {example_row['crossover']} | ATR: {example_row['atr']}
-Support: {example_row['support']} | Resistance: {example_row['resistance']}
-Sentiment: {example_row['sentiment_summary']} | News: {example_row['news_summary']}
-"""
-        
-        # Execute all output methods
-        asyncio.run(send_telegram_alert(alert_message))
-        append_to_sheet(example_row)
-        save_to_supabase(example_row)
-        
-        logger.info("Pipeline execution completed successfully")
-        
-    except Exception as e:
-        logger.error(f"Pipeline execution failed: {str(e)}\n{traceback.format_exc()}")
-    finally:
-        if conn:
-            conn.close()
-
-if __name__ == "__main__":
-    main()
+           
