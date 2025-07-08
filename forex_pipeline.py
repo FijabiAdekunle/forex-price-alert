@@ -124,16 +124,6 @@ def fetch_sentiment(pair):
     return "N/A"
 
 # === Detect Crossovers in Last N Candles ===
-def detect_recent_crossover(df, lookback=5):
-    recent = df.tail(lookback)
-    for i in range(1, len(recent)):
-        prev_ema10, prev_ema50 = recent.iloc[i-1]["ema10"], recent.iloc[i-1]["ema50"]
-        curr_ema10, curr_ema50 = recent.iloc[i]["ema10"], recent.iloc[i]["ema50"]
-        if prev_ema10 < prev_ema50 and curr_ema10 > curr_ema50:
-            return "Bullish Crossover"
-        elif prev_ema10 > prev_ema50 and curr_ema10 < curr_ema50:
-            return "Bearish Crossover"
-    return "No Crossover"
 
 def get_crossover_status(current_ema10: float, current_ema50: float,
                        prev_ema10: float, prev_ema50: float) -> str:
