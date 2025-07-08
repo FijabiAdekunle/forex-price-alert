@@ -135,6 +135,25 @@ def detect_recent_crossover(df, lookback=5):
             return "Bearish Crossover"
     return "No Crossover"
 
+def get_crossover_status(current_ema10: float, current_ema50: float,
+                       prev_ema10: float, prev_ema50: float) -> str:
+    """Determine EMA crossover status with more detailed information."""
+    try:
+        if prev_ema10 < prev_ema50 and current_ema10 > current_ema50:
+            return "Bullish Crossover (Golden Cross)"
+        elif prev_ema10 > prev_ema50 and current_ema10 < current_ema50:
+            return "Bearish Crossover (Death Cross)"
+        elif current_ema10 > current_ema50:
+            diff_percent = ((current_ema10 - current_ema50) / current_ema50) * 100
+            return f"EMA10 > EMA50 by {diff_percent:.2f}% (Bullish)"
+        else:
+            diff_percent = ((current_ema50 - current_ema10) / current_ema10) * 100
+            return f"EMA10 < EMA50 by {diff_percent:.2f}% (Bearish)"
+    except Exception as e:
+        log_message(f"❌ Crossover detection error: {str(e)}", "ERROR")
+        return "Crossover Unknown"
+
+
 # === Save to Neon DB ===
 def save_to_neon(row):
     try:
