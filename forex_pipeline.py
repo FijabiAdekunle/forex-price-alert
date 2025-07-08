@@ -98,27 +98,42 @@ def fetch_news(pair):
 
 def fetch_sentiment(pair):
     symbol_map = {
-        "EUR/USD": "OANDA:EUR_USD",
-        "GBP/USD": "OANDA:GBP_USD",
-        "USD/JPY": "OANDA:USD_JPY"
+        "EUR/USD": "EURUSD",
+        "GBP/USD": "GBPUSD",
+        "USD/JPY": "USDJPY"
     }
     symbol = symbol_map.get(pair)
     url = f"https://finnhub.io/api/v1/news-sentiment?symbol={symbol}&token={FINNHUB_API_KEY}"
     try:
-        r = requests.get(url)
-        sentiment = r.json().get("sentiment", {})
-        score = sentiment.get("companyNewsScore")
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        score = data.get("companyNewsScore")
         if score is not None:
-            if score > 0.2:
+            if score > 0.3:
+                return "Strongly Bullish"
+            elif 0.1 < score <= 0.3:
                 return "Bullish"
-            elif score < -0.2:
+            elif -0.1 <= score <= 0.1:
+                return "Neutral"
+            elif -0.3 <= score < -0.1:
                 return "Bearish"
             else:
-                return "Neutral"
+                return "Strongly Bearish"
     except Exception as e:
         log(f"Sentiment fetch error for {pair}: {e}")
     return "N/A"
 
+# === Detect Crossovers in Last N Candles ===
+def detect_recent_crossover(df, lookback=5):
+    recent = df.tail(lookback)
+    for i in range(1, len(recent)):
+        prev_ema10, prev_ema50 = recent.iloc[i-1]["ema10"], recent.iloc[i-1]["ema50"]
+        curr_ema10, curr_ema50 = recent.iloc[i]["ema10"], recent.iloc[i]["ema50"]
+        if prev_ema10 < prev_ema50 and curr_ema10 > curr_ema50:
+            return "Bullish Crossover"
+        elif prev_ema10 > prev_ema50 and curr_ema10 < curr_ema50:
+            return "Bearish Crossover"
+    return "No Crossover"
 
 # === Save to Neon DB ===
 def save_to_neon(row):
@@ -163,16 +178,12 @@ def main():
         df = fetch_data(symbol)
         df = compute_indicators(df)
         support, resistance = detect_levels(df)
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        crossover = "Bullish Crossover" if prev["ema10"] < prev["ema50"] and latest["ema10"] > latest["ema50"] \
-            else "Bearish Crossover" if prev["ema10"] > prev["ema50"] and latest["ema10"] < latest["ema50"] else "No Crossover"
-
-        trend = "Uptrend" if latest["ema10"] > latest["ema50"] else "Downtrend"
+        trend = "Uptrend" if df.iloc[-1]["ema10"] > df.iloc[-1]["ema50"] else "Downtrend"
+        crossover = detect_recent_crossover(df)
         news = fetch_news(pair)
         sentiment = fetch_sentiment(pair)
 
+        latest = df.iloc[-1]
         row = {
             "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "pair": pair,
@@ -184,12 +195,13 @@ def main():
         rows.append(row)
 
     for row in rows:
-        alert = f"\n🚨 {row['pair']} {row['trend_direction'].upper()}\n"
-        alert += f"🕒 {row['timestamp']}\nPrice: {row['close']} | RSI: {round(row['rsi'],2)}\n"
-        alert += f"EMA10: {round(row['ema10'],5)} | EMA50: {round(row['ema50'],5)}\n"
-        alert += f"Crossover: {row['crossover']} | ATR: {round(row['atr'],4)}\n"
-        alert += f"Support: {round(row['support'],4)} | Resistance: {round(row['resistance'],4)}\n"
-        alert += f"📢 Sentiment: {row['sentiment_summary']}\n🗞️ News: {row['news_summary']}"
+        alert = f"\n🚨 *{row['pair']} {row['trend_direction'].upper()}*\n"
+        alert += f"🕒 {row['timestamp']}\n 💰 *Price*: {row['close']} | *RSI*: {round(row['rsi'],2)}\n"
+        alert += f"📊 *EMA10*: {round(row['ema10'],5)} | *EMA50*: {round(row['ema50'],5)}\n"
+        alert += f"*Crossover*: {row['crossover']} | *ATR*: {round(row['atr'],4)}\n"
+        alert += f"📈 *ATR*: {row['atr'],4} | *Range:* {row['high'],4}-{row['low'],4}\n"
+        alert += f"🔽 *Support*: {round(row['support'],4)} | 🔼 *Resistance*: {round(row['resistance'],4)}\n"
+        alert += f"📢 *Sentiment*: {row['sentiment_summary']}\n🗞️ *News*: {row['news_summary']}"
 
         try:
             bot = telegram.Bot(token=TELEGRAM_TOKEN)
