@@ -1,17 +1,16 @@
-name: Run Forex Pipeline
+name: Run Forex Pipeline with Neon & NewsAPI
 
 on:
   schedule:
-    - cron: '0 9 * * *'
-    - cron: '0 12 * * *'
-    - cron: '0 14 * * *'
-    - cron: '0 18 * * *'
+    - cron: '0 9 * * *'    # 09:00 UTC
+    - cron: '0 12 * * *'   # 12:00 UTC
+    - cron: '0 14 * * *'   # 14:00 UTC
+    - cron: '0 18 * * *'   # 18:00 UTC
   workflow_dispatch:
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-
     env:
       TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
       PG_HOST: ${{ secrets.PG_HOST }}
@@ -22,9 +21,12 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
+      NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -33,7 +35,14 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
 
-      - name: Run pipeline
+      - name: Create gspread credentials
+        run: |
+          echo "$GSPREAD_KEY_JSON" > gspread_key.json
+        env:
+          GSPREAD_KEY_JSON: ${{ secrets.GSPREAD_KEY_JSON }}
+
+      - name: Run Forex Pipeline
         run: python forex_pipeline.py
