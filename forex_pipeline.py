@@ -123,26 +123,22 @@ def fetch_sentiment(pair):
         log(f"Sentiment fetch error for {pair}: {e}")
     return "N/A"
 
-# === Detect Crossovers in Last N Candles ===
-
-def get_crossover_status(current_ema10: float, current_ema50: float,
-                       prev_ema10: float, prev_ema50: float) -> str:
-    """Determine EMA crossover status with more detailed information."""
+# === Crossover Detection ===
+def get_crossover_status(current_ema10, current_ema50, prev_ema10, prev_ema50):
     try:
         if prev_ema10 < prev_ema50 and current_ema10 > current_ema50:
             return "Bullish Crossover (Golden Cross)"
         elif prev_ema10 > prev_ema50 and current_ema10 < current_ema50:
             return "Bearish Crossover (Death Cross)"
         elif current_ema10 > current_ema50:
-            diff_percent = ((current_ema10 - current_ema50) / current_ema50) * 100
-            return f"EMA10 > EMA50 by {diff_percent:.2f}% (Bullish)"
+            diff = ((current_ema10 - current_ema50) / current_ema50) * 100
+            return f"EMA10 > EMA50 by {diff:.2f}% (Bullish)"
         else:
-            diff_percent = ((current_ema50 - current_ema10) / current_ema10) * 100
-            return f"EMA10 < EMA50 by {diff_percent:.2f}% (Bearish)"
+            diff = ((current_ema50 - current_ema10) / current_ema10) * 100
+            return f"EMA10 < EMA50 by {diff:.2f}% (Bearish)"
     except Exception as e:
-        log_message(f"❌ Crossover detection error: {str(e)}", "ERROR")
+        log(f"Crossover detection error: {e}")
         return "Crossover Unknown"
-
 
 # === Save to Neon DB ===
 def save_to_neon(row):
@@ -187,12 +183,14 @@ def main():
         df = fetch_data(symbol)
         df = compute_indicators(df)
         support, resistance = detect_levels(df)
-        trend = "Uptrend" if df.iloc[-1]["ema10"] > df.iloc[-1]["ema50"] else "Downtrend"
-        crossover = detect_recent_crossover(df)
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        trend = "Uptrend" if latest["ema10"] > latest["ema50"] else "Downtrend"
+        crossover = get_crossover_status(latest["ema10"], latest["ema50"], prev["ema10"], prev["ema50"])
         news = fetch_news(pair)
         sentiment = fetch_sentiment(pair)
 
-        latest = df.iloc[-1]
         row = {
             "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "pair": pair,
@@ -208,18 +206,17 @@ def main():
         alert += f"🕒 {row['timestamp']}\n"
         alert += f"💰 *Price*: {round(row['close'], 5)} | *RSI*: {round(row['rsi'], 2)}\n"
         alert += f"📊 *EMA10*: {round(row['ema10'], 5)} | *EMA50*: {round(row['ema50'], 5)}\n"
-        alert += f"🔄 *Crossover*: {row['crossover']} | *ATR*: {round(row['atr'], 5)}\n"
-        alert += f"📈 *Range*: {round(row['high'], 5)} - {round(row['low'], 5)}\n"
+        alert += f"🔀 *{row['crossover']}*\n"
+        alert += f"📈 *Range*: {round(row['high'], 5)} - {round(row['low'], 5)} | *ATR*: {round(row['atr'], 5)}\n"
         alert += f"🔽 *Support*: {round(row['support'], 5)} | 🔼 *Resistance*: {round(row['resistance'], 5)}\n"
         alert += f"📢 *Sentiment*: {row['sentiment_summary']}\n"
         alert += f"🗞️ *News*: {row['news_summary']}"
 
         try:
-           bot = telegram.Bot(token=TELEGRAM_TOKEN)
-           asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"FJ Forex Alert:\n{alert}", parse_mode=telegram.constants.ParseMode.MARKDOWN))
+            bot = telegram.Bot(token=TELEGRAM_TOKEN)
+            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"FJ Forex Alert:\n{alert}", parse_mode=telegram.constants.ParseMode.MARKDOWN))
         except Exception as e:
             log(f"Telegram error: {e}")
-
 
         try:
             sheet.append_row(list(row.values()))
