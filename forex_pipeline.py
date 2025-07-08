@@ -98,15 +98,16 @@ def fetch_news(pair):
 
 def fetch_sentiment(pair):
     symbol_map = {
-        "EUR/USD": "EURUSD",
-        "GBP/USD": "GBPUSD",
-        "USD/JPY": "USDJPY"
+        "EUR/USD": "OANDA:EUR_USD",
+        "GBP/USD": "OANDA:GBP_USD",
+        "USD/JPY": "OANDA:USD_JPY"
     }
     symbol = symbol_map.get(pair)
     url = f"https://finnhub.io/api/v1/news-sentiment?symbol={symbol}&token={FINNHUB_API_KEY}"
     try:
         r = requests.get(url)
-        score = r.json().get("sentiment", {}).get("companyNewsScore")
+        sentiment = r.json().get("sentiment", {})
+        score = sentiment.get("companyNewsScore")
         if score is not None:
             if score > 0.2:
                 return "Bullish"
@@ -114,9 +115,10 @@ def fetch_sentiment(pair):
                 return "Bearish"
             else:
                 return "Neutral"
-    except:
-        pass
+    except Exception as e:
+        log(f"Sentiment fetch error for {pair}: {e}")
     return "N/A"
+
 
 # === Save to Neon DB ===
 def save_to_neon(row):
@@ -129,9 +131,22 @@ def save_to_neon(row):
                 support, resistance, trend_direction, crossover, sentiment_summary, news_summary
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            row["timestamp"], row["pair"], row["open"], row["high"], row["low"], row["close"],
-            row["ema10"], row["ema50"], row["rsi"], row["atr"], row["support"], row["resistance"],
-            row["trend_direction"], row["crossover"], row["sentiment_summary"], row["news_summary"]
+            row["timestamp"],
+            row["pair"],
+            float(row["open"]),
+            float(row["high"]),
+            float(row["low"]),
+            float(row["close"]),
+            float(row["ema10"]),
+            float(row["ema50"]),
+            float(row["rsi"]),
+            float(row["atr"]),
+            float(row["support"]),
+            float(row["resistance"]),
+            row["trend_direction"],
+            row["crossover"],
+            row["sentiment_summary"],
+            row["news_summary"]
         ))
         conn.commit()
         cur.close()
