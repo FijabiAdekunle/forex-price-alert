@@ -196,18 +196,21 @@ def main():
 
     for row in rows:
         alert = f"\n🚨 *{row['pair']} {row['trend_direction'].upper()}*\n"
-        alert += f"🕒 {row['timestamp']}\n 💰 *Price*: {row['close']} | *RSI*: {round(row['rsi'],2)}\n"
-        alert += f"📊 *EMA10*: {round(row['ema10'],5)} | *EMA50*: {round(row['ema50'],5)}\n"
-        alert += f"*Crossover*: {row['crossover']} | *ATR*: {round(row['atr'],4)}\n"
-        alert += f"📈 *ATR*: {row['atr'],4} | *Range:* {row['high'],4}-{row['low'],4}\n"
-        alert += f"🔽 *Support*: {round(row['support'],4)} | 🔼 *Resistance*: {round(row['resistance'],4)}\n"
-        alert += f"📢 *Sentiment*: {row['sentiment_summary']}\n🗞️ *News*: {row['news_summary']}"
+        alert += f"🕒 {row['timestamp']}\n"
+        alert += f"💰 *Price*: {round(row['close'], 5)} | *RSI*: {round(row['rsi'], 2)}\n"
+        alert += f"📊 *EMA10*: {round(row['ema10'], 5)} | *EMA50*: {round(row['ema50'], 5)}\n"
+        alert += f"🔄 *Crossover*: {row['crossover']} | *ATR*: {round(row['atr'], 5)}\n"
+        alert += f"📈 *Range*: {round(row['high'], 5)} - {round(row['low'], 5)}\n"
+        alert += f"🔽 *Support*: {round(row['support'], 5)} | 🔼 *Resistance*: {round(row['resistance'], 5)}\n"
+        alert += f"📢 *Sentiment*: {row['sentiment_summary']}\n"
+        alert += f"🗞️ *News*: {row['news_summary']}"
 
         try:
-            bot = telegram.Bot(token=TELEGRAM_TOKEN)
-            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"FJ Forex Alert:{alert}"))
+           bot = telegram.Bot(token=TELEGRAM_TOKEN)
+           asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"FJ Forex Alert:\n{alert}", parse_mode=telegram.constants.ParseMode.MARKDOWN))
         except Exception as e:
             log(f"Telegram error: {e}")
+
 
         try:
             sheet.append_row(list(row.values()))
