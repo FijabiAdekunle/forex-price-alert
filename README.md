@@ -50,7 +50,6 @@ A robust, end-to-end **Forex Data Pipeline** that:
 
 | API | Purpose |
 |------|---------|
-|**Alpha Vantage API** | Provides real-time and historical Forex (and market) time series used to fetch price data for currency pairs and feed the indicator calculations.
 | **Twelve Data API** | Fetch real-time & historical Forex OHLC prices for EUR/USD, GBP/USD, USD/JPY |
 | **NewsAPI** | Pull latest market-related headlines for the base currency |
 | **Finnhub API** | Retrieve sentiment scores and categorize them (Bullish, Bearish, etc.) |
