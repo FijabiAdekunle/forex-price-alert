@@ -1,95 +1,127 @@
-# 📊 Forex Data Pipeline
-[![Chat-GPT-Image-Jun-1-2025-10-08-53-PM.png](https://i.postimg.cc/WbVnfVJC/Chat-GPT-Image-Jun-1-2025-10-08-53-PM.png)](https://postimg.cc/QV61HRmJ)
+# 📊 Forex Data Pipeline & Price Dashboard
+[![Forex-pipeline-Automation.png](https://i.postimg.cc/gkvPT8KX/Forex-pipeline-Automation.png)](https://postimg.cc/dLtX77pw)
 
-A robust end-to-end pipeline that pulls live Forex data using the Alpha Vantage API, calculates key technical indicators (EMA, RSI, ATR), stores data in both PostgreSQL and Google Sheets, and sends price alerts via Telegram.
+A robust, end-to-end **Forex Data Pipeline** that:
+- Pulls **live Forex data** via multiple APIs
+- Calculates **EMA, RSI, ATR** and other key indicators
+- Logs data into **PostgreSQL** & **Google Sheets**
+- Sends **price alerts** to Telegram
+- Displays a **real-time Google Sheets Dashboard**
 
 ---
 
 ## 🚀 Features
 
-- 📈 **Live Forex Rates** for EUR/USD, GBP/USD, and USD/JPY
-- 🧮 **Technical Indicators**:
-  - RSI (Relative Strength Index)
-  - EMA (Exponential Moving Average)
-  - ATR (Average True Range)
-- 🗄️ **PostgreSQL Database Logging**
-- 📤 **Google Sheets Logging** (via Service Account)
-- 📢 **Telegram Alerts** for user-defined price thresholds
+- **Live Forex Rates** for:
+  - EUR/USD
+  - GBP/USD
+  - USD/JPY
+- **Technical Indicators:**
+  - EMA (10 & 50)
+  - RSI
+  - ATR
+- **Data Storage:**
+  - PostgreSQL (Neon) for historical logging
+  - Google Sheets for real-time display
+- **Alerts:**
+  - Telegram notifications with trend, crossover, sentiment, and news
+- **Visual Dashboard:**
+  - Real-time KPI summary
+  - Signal Table
+  - Rate vs Time chart
+  - RSI Trend chart
 
 ---
 
-## 🛠️ Tech Stack
+## 🖥 Dashboard Preview
 
-- Python 3.10+
-- [Alpha Vantage API](https://www.alphavantage.co/)
-- PostgreSQL
-- gspread + Google Service Account
-- Telegram Bot API
-- `python-dotenv` for secrets
-- `psycopg2`, `gspread`, `requests`, `pandas`, `ta`, etc.
+**Signal Table + KPI Summary**  
+[![Fx-Signl-kpi-Dashboard.png](https://i.postimg.cc/mkLbp7wY/Fx-Signl-kpi-Dashboard.png)](https://postimg.cc/XGPSpGtq)
+
+**Rate vs Timestamp Chart**  
+[![Fx-Rate-Chart-Dashboard.png](https://i.postimg.cc/RFQSTgcC/Fx-Rate-Chart-Dashboard.png)](https://postimg.cc/WFzcN6Wx)
+
+**RSI Trend Chart**  
+[![Fx-RSI-Chart-Dashboard.png](https://i.postimg.cc/Hn6TqjZf/Fx-RSI-Chart-Dashboard.png)](https://postimg.cc/vx6R98dz)
 
 ---
 
-## 📦 Installation
+## 🌐 APIs Used & Purpose
 
-1. **Clone the repository:**
+| API | Purpose |
+|------|---------|
+|**Alpha Vantage API** | Provides real-time and historical Forex (and market) time series used to fetch price data for currency pairs and feed the indicator calculations.
+| **Twelve Data API** | Fetch real-time & historical Forex OHLC prices for EUR/USD, GBP/USD, USD/JPY |
+| **NewsAPI** | Pull latest market-related headlines for the base currency |
+| **Finnhub API** | Retrieve sentiment scores and categorize them (Bullish, Bearish, etc.) |
+| **Google Sheets API** | Store data in Google Sheets for real-time dashboard display |
+| **Telegram Bot API** | Send instant price alerts with market context to the user’s chat |
+
+---
+
+## 🛠 Tech Stack
+
+- **Backend:** Python 3.10+
+- **APIs:** Twelve Data, NewsAPI, Finnhub, Google Sheets API, Telegram Bot API
+- **Database:** PostgreSQL (Neon)
+- **Libraries:** pandas, requests, psycopg2, gspread, python-dotenv, asyncio, ta
+- **Environment Management:** python-dotenv
+- **Visualization:** Google Sheets dashboard
+
+---
 
 
-git clone https://github.com/yourusername/forex-data-pipeline.git
-cd forex-data-pipeline
 
-2. **Install dependencies:**
-- pip install -r requirements.txt
 
-3. **Set up environment variables:**
-- Create a .env file in the root directory with the following:
 
-# AlphaVantage API
-ALPHAVANTAGE_API_KEY="your_alpha_vantage_key"
+## Set up your .env file:
+### API Keys
+TWELVE_DATA_API_KEY=your_twelve_data_key
+NEWSAPI_KEY=your_newsapi_key
+FINNHUB_API_KEY=your_finnhub_key
 
-# PostgreSQL Configuration
-PG_HOST=localhost
+### PostgreSQL (Neon)
+PG_HOST=your_host
 PG_PORT=5432
 PG_DB=forex_db
 PG_USER=postgres
-PG_PASSWORD=yourpassword
+PG_PASSWORD=your_password
 
-# Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN="your_bot_token"
-TELEGRAM_CHAT_ID="your_chat_id"
+### Telegram Bot
+TELEGRAM_BOT_TOKEN=your_telegram_token
+TELEGRAM_CHAT_ID=your_chat_id
 
-# Google Sheets JSON (only for CI/CD environments)
-GSPREAD_KEY_JSON='{"type":"service_account", ...}'  # Optional: encoded JSON as a string
+### Google Sheets
+GOOGLE_SHEET_NAME=YourGoogleSheetName
 
-# 🧪 Usage
-- Run the main script:
-
-`python forex_pipeline.py`
+## ▶ Usage
+- Run the main pipeline:
+> python forex_pipeline.py
 
 This will:
 
-- Fetch Forex rates and compute indicators
+- Fetch Forex rates and compute technical indicators
 
-- Log results to Google Sheets and PostgreSQL
+- Log results to PostgreSQL and Google Sheets
 
-- Send alerts via Telegram (if thresholds are breached)
+- Fetch latest news and sentiment
 
+- Send formatted alerts to Telegram
 
-## 📊 Example Google Sheet
-- The output logs include: `timestamp`, `symbol`, `price`, `RSI`, `EMA`, `ATR`, `alert_triggered`
+- Update the Google Sheets dashboard in real-time
 
-- Useful for real-time monitoring and strategy refinement.
+### 📊 Example Output in Google 
+| Timestamp           | Pair    | Open   | High   | Low    | Close  | EMA10  | EMA50  | RSI  | ATR     | Support | Resistance | Trend   | Crossover               | Sentiment | News                       |
+| ------------------- | ------- | ------ | ------ | ------ | ------ | ------ | ------ | ---- | ------- | ------- | ---------- | ------- | ----------------------- | --------- | -------------------------- |
+| 2025-08-09 09:23:18 | EUR/USD | 1.1660 | 1.1670 | 1.1655 | 1.1661 | 1.1662 | 1.1659 | 55.2 | 0.00064 | 1.1650  | 1.1675     | Uptrend | EMA10 > EMA50 (Bullish) | Bullish   | ECB rate decision expected |
 
 ## 🔒 Security
+*All API keys and credentials are stored in .env or GitHub Secrets.*
 
-- All API keys and credentials are stored in `.env` or `GitHub Secrets`.
+**Never commit .env or gspread_key.json to public repositories.**
 
-*Do not commit .env or gspread_key.json files to public repositories.*
+👨‍💻 Author
 
-
-# 👨‍💻 Author
 **Fijabi J. Adekunle**
 
-*Data Scientist | Trader | Marine Engineer*
-
-**Motto: Navigating Data | Unveiling Insights | Driving Impacts**
+>**Motto**: *Navigating Data | Unveiling Insights | Driving Impacts*
