@@ -115,9 +115,9 @@ This will:
 | 2025-08-09 09:23:18 | EUR/USD | 1.1660 | 1.1670 | 1.1655 | 1.1661 | 1.1662 | 1.1659 | 55.2 | 0.00064 | 1.1650  | 1.1675     | Uptrend | EMA10 > EMA50 (Bullish) | Bullish   | ECB rate decision expected |
 
 ## 🔒 Security
-*All API keys and credentials are stored in .env or GitHub Secrets.*
+*All API keys and credentials are stored in  GitHub Secrets.*
 
-**Never commit .env or gspread_key.json to public repositories.**
+**Never commit .env or gspread_key.json to publicrepositories.**
 
 👨‍💻 Author
 
